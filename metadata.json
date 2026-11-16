@@ -1,0 +1,8 @@
+{
+  "name": "Myraa AI",
+  "description": "MYRAA AI Super Brain multi-AI orchestration and app development platform supporting Bengali, English, and Bangla-English.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

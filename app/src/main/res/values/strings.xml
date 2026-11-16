@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">Myraa AI</string>
+    <string name="brand_headline">MYRAA AI SUPER BRAIN</string>
+    <string name="part_01_badge">PART 01 • CORE AI FOUNDATION</string>
+    <string name="auth_subtitle">Multilingual Multi-AI Orchestration Platform for Bengali, English &amp; Bangla-English</string>
+    <string name="sign_in_with_google">Sign in with Google</string>
+    <string name="auth_privacy_note">Secured with Google Sign-In, Firebase App Check &amp; isolated user Project Memory.</string>
+    <string name="master_brain_subtitle">Master AI Brain • Model Router • Project Memory</string>
+    <string name="brain_avatar_desc">MYRAA AI Super Brain emblem</string>
+    <string name="attach_image_desc">Attach visual reference image</string>
+    <string name="voice_input_desc">Speak prompt via voice dictation</string>
+    <string name="send_directive_desc">Send directive to Master AI Brain</string>
+    <string name="prompt_placeholder">Ask or plan in বাংলা, EN, or Banglish...</string>
+    <string name="nav_brain">Brain</string>
+    <string name="nav_providers">Model Hub</string>
+    <string name="nav_app_studio">App Studio</string>
+    <string name="nav_workspace">Workspace</string>
+    <string name="nav_projects">Projects</string>
+    <string name="nav_architecture">Studio</string>
+    <string name="nav_settings">Settings</string>
+</resources>

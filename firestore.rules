@@ -1,0 +1,552 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: default deny everything
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Shared hardened primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidLanguage(lang) {
+      return lang is string && (lang == 'AUTO' || lang == 'EN' || lang == 'BN' || lang == 'BN_EN');
+    }
+
+    function isValidRoutingPolicy(policy) {
+      return policy is string && (policy == 'AUTO_BALANCED' || policy == 'QUALITY_DEFAULT' || policy == 'ULTRA_FAST');
+    }
+
+    function isValidFramework(framework) {
+      return framework is string && (
+        framework == 'ANDROID_COMPOSE' ||
+        framework == 'WEB_APP' ||
+        framework == 'BACKEND_API' ||
+        framework == 'FULLSTACK_SYSTEM'
+      );
+    }
+
+    function isValidProjectStatus(status) {
+      return status is string && (
+        status == 'PLANNING' ||
+        status == 'ACTIVE' ||
+        status == 'PAUSED' ||
+        status == 'ARCHIVED'
+      );
+    }
+
+    function isValidBuildType(buildType) {
+      return buildType is string && (buildType == 'DEBUG' || buildType == 'RELEASE');
+    }
+
+    function isValidBuildJobStatus(status) {
+      return status is string && (
+        status == 'QUEUED' ||
+        status == 'PREPARING_WORKSPACE' ||
+        status == 'RUNNING_GRADLE' ||
+        status == 'VALIDATING_APK' ||
+        status == 'SUCCEEDED' ||
+        status == 'FAILED'
+      );
+    }
+
+    function isBoundedStringList(arr, maxLen) {
+      return arr is list && arr.size() <= maxLen && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= 500));
+    }
+
+    function isValidUserWorkspace(data) {
+      return data.userId is string &&
+             data.userId == request.auth.uid &&
+             data.displayName is string &&
+             data.displayName.size() >= 1 &&
+             data.displayName.size() <= 100 &&
+             isValidLanguage(data.preferredLanguage) &&
+             isValidRoutingPolicy(data.routingPolicy) &&
+             (!('activeProjectId' in data) || data.activeProjectId == null || isValidId(data.activeProjectId)) &&
+             (!('backendServiceUrl' in data) || data.backendServiceUrl == null || (data.backendServiceUrl is string && data.backendServiceUrl.size() <= 512)) &&
+             (!('preferredBuildType' in data) || isValidBuildType(data.preferredBuildType)) &&
+             (!('defaultPackagePrefix' in data) || (data.defaultPackagePrefix is string && data.defaultPackagePrefix.size() <= 80)) &&
+             data.createdAt is timestamp &&
+             data.createdAt <= request.time &&
+             data.updatedAt is timestamp &&
+             data.updatedAt <= request.time;
+    }
+
+    function isValidBrainProject(data) {
+      return data.userId is string &&
+             data.userId == request.auth.uid &&
+             data.name is string &&
+             data.name.size() >= 1 &&
+             data.name.size() <= 120 &&
+             isValidFramework(data.targetFramework) &&
+             data.requirementsSummary is string &&
+             data.requirementsSummary.size() <= 4000 &&
+             isValidLanguage(data.detectedLanguage) &&
+             data.architectureSummary is string &&
+             data.architectureSummary.size() <= 4000 &&
+             isBoundedStringList(data.completedFeatures, 25) &&
+             isBoundedStringList(data.pendingFeatures, 25) &&
+             isValidProjectStatus(data.status) &&
+             (!('appCategory' in data) || (data.appCategory is string && data.appCategory.size() <= 40)) &&
+             (!('packageName' in data) || (data.packageName is string && data.packageName.size() <= 128)) &&
+             (!('appVersionName' in data) || (data.appVersionName is string && data.appVersionName.size() <= 32)) &&
+             (!('appVersionCode' in data) || (data.appVersionCode is int && data.appVersionCode >= 1 && data.appVersionCode <= 1000000)) &&
+             (!('iconStyle' in data) || (data.iconStyle is string && data.iconStyle.size() <= 64)) &&
+             (!('selectedPermissions' in data) || isBoundedStringList(data.selectedPermissions, 20)) &&
+             (!('latestBuildJobId' in data) || data.latestBuildJobId == null || isValidId(data.latestBuildJobId)) &&
+             (!('latestBuildStatus' in data) || (data.latestBuildStatus is string && data.latestBuildStatus.size() <= 40)) &&
+             (!('fileCount' in data) || (data.fileCount is int && data.fileCount >= 0 && data.fileCount <= 500)) &&
+             data.createdAt is timestamp &&
+             data.createdAt <= request.time &&
+             data.updatedAt is timestamp &&
+             data.updatedAt <= request.time;
+    }
+
+    function isValidBrainMessage(data, projectId) {
+      return data.userId is string &&
+             data.userId == request.auth.uid &&
+             data.projectId is string &&
+             data.projectId == projectId &&
+             data.role is string &&
+             (data.role == 'USER' || data.role == 'BRAIN') &&
+             data.content is string &&
+             data.content.size() >= 1 &&
+             data.content.size() <= 16000 &&
+             isValidLanguage(data.detectedLanguage) &&
+             data.selectedProviderId is string &&
+             data.selectedProviderId.size() <= 64 &&
+             data.selectedModelId is string &&
+             data.selectedModelId.size() <= 64 &&
+             data.intentSummary is string &&
+             data.intentSummary.size() <= 1000 &&
+             isBoundedStringList(data.assignedAgents, 13) &&
+             isBoundedStringList(data.subtasks, 20) &&
+             data.latencyMs is int &&
+             data.latencyMs >= 0 &&
+             data.latencyMs <= 600000 &&
+             data.createdAt is timestamp &&
+             data.createdAt <= request.time;
+    }
+
+    function isValidProjectFile(data, projectId) {
+      return data.userId is string &&
+             data.userId == request.auth.uid &&
+             data.projectId is string &&
+             data.projectId == projectId &&
+             data.path is string &&
+             data.path.size() >= 1 &&
+             data.path.size() <= 300 &&
+             !data.path.matches('.*\\.\\..*') &&
+             data.fileName is string &&
+             data.fileName.size() >= 1 &&
+             data.fileName.size() <= 128 &&
+             data.language is string &&
+             data.language.size() >= 1 &&
+             data.language.size() <= 32 &&
+             data.content is string &&
+             data.content.size() <= 120000 &&
+             data.sizeBytes is int &&
+             data.sizeBytes >= 0 &&
+             data.sizeBytes <= 500000 &&
+             data.checksumSha256 is string &&
+             data.checksumSha256.size() == 64 &&
+             data.updatedByAgent is string &&
+             data.updatedByAgent.size() >= 1 &&
+             data.updatedByAgent.size() <= 80 &&
+             data.createdAt is timestamp &&
+             data.createdAt <= request.time &&
+             data.updatedAt is timestamp &&
+             data.updatedAt <= request.time;
+    }
+
+    function isValidProjectVersion(data, projectId) {
+      return data.userId is string &&
+             data.userId == request.auth.uid &&
+             data.projectId is string &&
+             data.projectId == projectId &&
+             data.versionNumber is int &&
+             data.versionNumber >= 1 &&
+             data.versionNumber <= 100000 &&
+             data.summary is string &&
+             data.summary.size() >= 1 &&
+             data.summary.size() <= 500 &&
+             data.createdByAgent is string &&
+             data.createdByAgent.size() >= 1 &&
+             data.createdByAgent.size() <= 80 &&
+             data.fileEntries is list &&
+             data.fileEntries.size() <= 40 &&
+             (data.fileEntries.size() == 0 || (
+               data.fileEntries[0] is map &&
+               data.fileEntries[0].path is string &&
+               data.fileEntries[0].path.size() <= 300 &&
+               data.fileEntries[0].content is string
+             )) &&
+             data.createdAt is timestamp &&
+             data.createdAt <= request.time;
+    }
+
+    function isValidBuildJob(data, projectId) {
+      return data.userId is string &&
+             data.userId == request.auth.uid &&
+             data.projectId is string &&
+             data.projectId == projectId &&
+             isValidBuildJobStatus(data.status) &&
+             isValidBuildType(data.buildType) &&
+             data.appName is string &&
+             data.appName.size() >= 1 &&
+             data.appName.size() <= 120 &&
+             data.packageName is string &&
+             data.packageName.size() >= 3 &&
+             data.packageName.size() <= 128 &&
+             data.versionName is string &&
+             data.versionName.size() >= 1 &&
+             data.versionName.size() <= 32 &&
+             data.versionCode is int &&
+             data.versionCode >= 1 &&
+             data.versionCode <= 1000000 &&
+             data.targetServerUrl is string &&
+             data.targetServerUrl.size() <= 512 &&
+             data.startedByModel is string &&
+             data.startedByModel.size() >= 1 &&
+             data.startedByModel.size() <= 64 &&
+             data.logSummary is string &&
+             data.logSummary.size() <= 32000 &&
+             data.errorSummary is string &&
+             data.errorSummary.size() <= 8000 &&
+             data.durationMs is int &&
+             data.durationMs >= 0 &&
+             data.durationMs <= 1800000 &&
+             data.createdAt is timestamp &&
+             data.createdAt <= request.time &&
+             data.updatedAt is timestamp &&
+             data.updatedAt <= request.time;
+    }
+
+    function isValidBuildArtifact(data, projectId) {
+      return data.userId is string &&
+             data.userId == request.auth.uid &&
+             data.projectId is string &&
+             data.projectId == projectId &&
+             isValidId(data.jobId) &&
+             data.fileName is string &&
+             data.fileName.size() >= 5 &&
+             data.fileName.size() <= 160 &&
+             data.downloadUrl is string &&
+             data.downloadUrl.size() >= 8 &&
+             data.downloadUrl.size() <= 1024 &&
+             data.sha256 is string &&
+             data.sha256.size() == 64 &&
+             data.sizeBytes is int &&
+             data.sizeBytes > 0 &&
+             data.sizeBytes <= 524288000 &&
+             isValidBuildType(data.buildType) &&
+             data.apkVerified is bool &&
+             data.apkVerified == true &&
+             data.expiresAtEpochMs is int &&
+             data.expiresAtEpochMs > 0 &&
+             data.createdAt is timestamp &&
+             data.createdAt <= request.time;
+    }
+
+    function isValidUsageLog(data) {
+      return data.userId is string &&
+             data.userId == request.auth.uid &&
+             isValidId(data.projectId) &&
+             data.providerId is string &&
+             data.providerId.size() >= 1 &&
+             data.providerId.size() <= 64 &&
+             data.modelId is string &&
+             data.modelId.size() >= 1 &&
+             data.modelId.size() <= 64 &&
+             data.taskRole is string &&
+             data.taskRole.size() >= 1 &&
+             data.taskRole.size() <= 64 &&
+             isValidLanguage(data.inputLanguage) &&
+             data.estimatedInputChars is int &&
+             data.estimatedInputChars >= 0 &&
+             data.estimatedInputChars <= 2000000 &&
+             data.estimatedOutputChars is int &&
+             data.estimatedOutputChars >= 0 &&
+             data.estimatedOutputChars <= 2000000 &&
+             data.latencyMs is int &&
+             data.latencyMs >= 0 &&
+             data.latencyMs <= 600000 &&
+             data.succeeded is bool &&
+             (!('promptTokens' in data) || (data.promptTokens is int && data.promptTokens >= 0 && data.promptTokens <= 1000000)) &&
+             (!('completionTokens' in data) || (data.completionTokens is int && data.completionTokens >= 0 && data.completionTokens <= 1000000)) &&
+             (!('estimatedCostUsdMicros' in data) || (data.estimatedCostUsdMicros is int && data.estimatedCostUsdMicros >= 0 && data.estimatedCostUsdMicros <= 100000000)) &&
+             data.createdAt is timestamp &&
+             data.createdAt <= request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if false;
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'preferredLanguage', 'routingPolicy', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'displayName', 'preferredLanguage', 'routingPolicy',
+                         'activeProjectId', 'backendServiceUrl', 'preferredBuildType',
+                         'defaultPackagePrefix', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidUserWorkspace(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       isValidUserWorkspace(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'displayName', 'preferredLanguage', 'routingPolicy',
+                         'activeProjectId', 'backendServiceUrl', 'preferredBuildType',
+                         'defaultPackagePrefix', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+
+      match /projects/{projectId} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(projectId) && request.auth.uid == userId;
+        allow list: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(projectId) &&
+                         request.auth.uid == userId &&
+                         incoming().keys().hasAll([
+                           'userId', 'name', 'targetFramework', 'requirementsSummary',
+                           'detectedLanguage', 'architectureSummary', 'completedFeatures',
+                           'pendingFeatures', 'status', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'name', 'targetFramework', 'requirementsSummary',
+                           'detectedLanguage', 'architectureSummary', 'completedFeatures',
+                           'pendingFeatures', 'status', 'appCategory', 'packageName',
+                           'appVersionName', 'appVersionCode', 'iconStyle',
+                           'selectedPermissions', 'latestBuildJobId', 'latestBuildStatus',
+                           'fileCount', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidBrainProject(incoming());
+
+        allow update: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(projectId) &&
+                         request.auth.uid == userId &&
+                         isValidBrainProject(incoming()) &&
+                         existing().status != 'ARCHIVED' &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'name', 'targetFramework', 'requirementsSummary',
+                           'detectedLanguage', 'architectureSummary', 'completedFeatures',
+                           'pendingFeatures', 'status', 'appCategory', 'packageName',
+                           'appVersionName', 'appVersionCode', 'iconStyle',
+                           'selectedPermissions', 'latestBuildJobId', 'latestBuildStatus',
+                           'fileCount', 'updatedAt'
+                         ]);
+
+        allow delete: if isSignedIn() && isValidId(userId) && isValidId(projectId) && request.auth.uid == userId;
+
+        match /messages/{messageId} {
+          allow get: if isSignedIn() && isValidId(userId) && isValidId(projectId) && isValidId(messageId) && request.auth.uid == userId;
+          allow list: if isSignedIn() && isValidId(userId) && isValidId(projectId) && request.auth.uid == userId;
+
+          allow create: if isSignedIn() &&
+                           isValidId(userId) &&
+                           isValidId(projectId) &&
+                           isValidId(messageId) &&
+                           request.auth.uid == userId &&
+                           incoming().keys().hasAll([
+                             'userId', 'projectId', 'role', 'content', 'detectedLanguage',
+                             'selectedProviderId', 'selectedModelId', 'intentSummary',
+                             'assignedAgents', 'subtasks', 'latencyMs', 'createdAt'
+                           ]) &&
+                           incoming().keys().hasOnly([
+                             'userId', 'projectId', 'role', 'content', 'detectedLanguage',
+                             'selectedProviderId', 'selectedModelId', 'intentSummary',
+                             'assignedAgents', 'subtasks', 'latencyMs', 'createdAt'
+                           ]) &&
+                           isValidBrainMessage(incoming(), projectId) &&
+                           exists(/databases/$(database)/documents/users/$(userId)/projects/$(projectId));
+
+          allow update: if false;
+          allow delete: if isSignedIn() && isValidId(userId) && isValidId(projectId) && isValidId(messageId) && request.auth.uid == userId;
+        }
+
+        match /files/{fileId} {
+          allow get: if isSignedIn() && isValidId(userId) && isValidId(projectId) && isValidId(fileId) && request.auth.uid == userId;
+          allow list: if isSignedIn() && isValidId(userId) && isValidId(projectId) && request.auth.uid == userId;
+
+          allow create: if isSignedIn() &&
+                           isValidId(userId) &&
+                           isValidId(projectId) &&
+                           isValidId(fileId) &&
+                           request.auth.uid == userId &&
+                           incoming().keys().hasAll([
+                             'userId', 'projectId', 'path', 'fileName', 'language', 'content',
+                             'sizeBytes', 'checksumSha256', 'updatedByAgent', 'createdAt', 'updatedAt'
+                           ]) &&
+                           incoming().keys().hasOnly([
+                             'userId', 'projectId', 'path', 'fileName', 'language', 'content',
+                             'sizeBytes', 'checksumSha256', 'updatedByAgent', 'createdAt', 'updatedAt'
+                           ]) &&
+                           isValidProjectFile(incoming(), projectId) &&
+                           exists(/databases/$(database)/documents/users/$(userId)/projects/$(projectId));
+
+          allow update: if isSignedIn() &&
+                           isValidId(userId) &&
+                           isValidId(projectId) &&
+                           isValidId(fileId) &&
+                           request.auth.uid == userId &&
+                           isValidProjectFile(incoming(), projectId) &&
+                           incoming().userId == existing().userId &&
+                           incoming().projectId == existing().projectId &&
+                           incoming().createdAt == existing().createdAt &&
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'path', 'fileName', 'language', 'content',
+                             'sizeBytes', 'checksumSha256', 'updatedByAgent', 'updatedAt'
+                           ]) &&
+                           get(/databases/$(database)/documents/users/$(userId)/projects/$(projectId)).data.status != 'ARCHIVED';
+
+          allow delete: if isSignedIn() && isValidId(userId) && isValidId(projectId) && isValidId(fileId) && request.auth.uid == userId;
+        }
+
+        match /versions/{versionId} {
+          allow get: if isSignedIn() && isValidId(userId) && isValidId(projectId) && isValidId(versionId) && request.auth.uid == userId;
+          allow list: if isSignedIn() && isValidId(userId) && isValidId(projectId) && request.auth.uid == userId;
+
+          allow create: if isSignedIn() &&
+                           isValidId(userId) &&
+                           isValidId(projectId) &&
+                           isValidId(versionId) &&
+                           request.auth.uid == userId &&
+                           incoming().keys().hasAll([
+                             'userId', 'projectId', 'versionNumber', 'summary',
+                             'createdByAgent', 'fileEntries', 'createdAt'
+                           ]) &&
+                           incoming().keys().hasOnly([
+                             'userId', 'projectId', 'versionNumber', 'summary',
+                             'createdByAgent', 'fileEntries', 'createdAt'
+                           ]) &&
+                           isValidProjectVersion(incoming(), projectId) &&
+                           exists(/databases/$(database)/documents/users/$(userId)/projects/$(projectId));
+
+          allow update: if false;
+          allow delete: if isSignedIn() && isValidId(userId) && isValidId(projectId) && isValidId(versionId) && request.auth.uid == userId;
+        }
+
+        match /build_jobs/{jobId} {
+          allow get: if isSignedIn() && isValidId(userId) && isValidId(projectId) && isValidId(jobId) && request.auth.uid == userId;
+          allow list: if isSignedIn() && isValidId(userId) && isValidId(projectId) && request.auth.uid == userId;
+
+          allow create: if isSignedIn() &&
+                           isValidId(userId) &&
+                           isValidId(projectId) &&
+                           isValidId(jobId) &&
+                           request.auth.uid == userId &&
+                           incoming().keys().hasAll([
+                             'userId', 'projectId', 'status', 'buildType', 'appName',
+                             'packageName', 'versionName', 'versionCode', 'targetServerUrl',
+                             'startedByModel', 'logSummary', 'errorSummary', 'durationMs',
+                             'createdAt', 'updatedAt'
+                           ]) &&
+                           incoming().keys().hasOnly([
+                             'userId', 'projectId', 'status', 'buildType', 'appName',
+                             'packageName', 'versionName', 'versionCode', 'targetServerUrl',
+                             'startedByModel', 'logSummary', 'errorSummary', 'durationMs',
+                             'createdAt', 'updatedAt'
+                           ]) &&
+                           isValidBuildJob(incoming(), projectId) &&
+                           exists(/databases/$(database)/documents/users/$(userId)/projects/$(projectId));
+
+          allow update: if isSignedIn() &&
+                           isValidId(userId) &&
+                           isValidId(projectId) &&
+                           isValidId(jobId) &&
+                           request.auth.uid == userId &&
+                           isValidBuildJob(incoming(), projectId) &&
+                           existing().status != 'SUCCEEDED' &&
+                           existing().status != 'FAILED' &&
+                           incoming().userId == existing().userId &&
+                           incoming().projectId == existing().projectId &&
+                           incoming().createdAt == existing().createdAt &&
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'status', 'logSummary', 'errorSummary', 'durationMs', 'updatedAt'
+                           ]);
+
+          allow delete: if isSignedIn() && isValidId(userId) && isValidId(projectId) && isValidId(jobId) && request.auth.uid == userId;
+        }
+
+        match /artifacts/{artifactId} {
+          allow get: if isSignedIn() && isValidId(userId) && isValidId(projectId) && isValidId(artifactId) && request.auth.uid == userId;
+          allow list: if isSignedIn() && isValidId(userId) && isValidId(projectId) && request.auth.uid == userId;
+
+          allow create: if isSignedIn() &&
+                           isValidId(userId) &&
+                           isValidId(projectId) &&
+                           isValidId(artifactId) &&
+                           request.auth.uid == userId &&
+                           incoming().keys().hasAll([
+                             'userId', 'projectId', 'jobId', 'fileName', 'downloadUrl',
+                             'sha256', 'sizeBytes', 'buildType', 'apkVerified',
+                             'expiresAtEpochMs', 'createdAt'
+                           ]) &&
+                           incoming().keys().hasOnly([
+                             'userId', 'projectId', 'jobId', 'fileName', 'downloadUrl',
+                             'sha256', 'sizeBytes', 'buildType', 'apkVerified',
+                             'expiresAtEpochMs', 'createdAt'
+                           ]) &&
+                           isValidBuildArtifact(incoming(), projectId) &&
+                           exists(/databases/$(database)/documents/users/$(userId)/projects/$(projectId)) &&
+                           exists(/databases/$(database)/documents/users/$(userId)/projects/$(projectId)/build_jobs/$(incoming().jobId));
+
+          allow update: if false;
+          allow delete: if isSignedIn() && isValidId(userId) && isValidId(projectId) && isValidId(artifactId) && request.auth.uid == userId;
+        }
+      }
+
+      match /usage_logs/{logId} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(logId) && request.auth.uid == userId;
+        allow list: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(logId) &&
+                         request.auth.uid == userId &&
+                         incoming().keys().hasAll([
+                           'userId', 'projectId', 'providerId', 'modelId', 'taskRole',
+                           'inputLanguage', 'estimatedInputChars', 'estimatedOutputChars',
+                           'latencyMs', 'succeeded', 'createdAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'projectId', 'providerId', 'modelId', 'taskRole',
+                           'inputLanguage', 'estimatedInputChars', 'estimatedOutputChars',
+                           'latencyMs', 'succeeded', 'promptTokens', 'completionTokens',
+                           'estimatedCostUsdMicros', 'createdAt'
+                         ]) &&
+                         isValidUsageLog(incoming());
+
+        allow update: if false;
+        allow delete: if isSignedIn() && isValidId(userId) && isValidId(logId) && request.auth.uid == userId;
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: myraa-super-brain-backend
+    runtime: node
+    rootDir: backend
+    plan: free
+    region: singapore
+    buildCommand: node -v
+    startCommand: node src/server.mjs
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: PORT
+        value: "10000"
+      - key: FIREBASE_PROJECT_ID
+        value: gen-lang-client-0645829429
+      - key: FIREBASE_PROJECT_NUMBER
+        value: "514839656668"
+      - key: FIREBASE_ANDROID_APP_ID
+        value: 1:514839656668:android:fe8f5c54f44c419f555c19
+      - key: ANDROID_PACKAGE_NAME
+        value: com.aistudio.myraa.qxkrmp
+      - key: ALLOW_EMULATOR_TOKENS
+        value: "false"
+      - key: REQUIRE_APP_CHECK
+        value: "false"
+      - key: MYRAA_KEY_VAULT_SECRET
+        generateValue: true
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false

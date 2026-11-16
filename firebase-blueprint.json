@@ -1,0 +1,258 @@
+{
+  "entities": {
+    "UserWorkspace": {
+      "title": "UserWorkspace",
+      "description": "Authenticated user's Super Brain profile, workspace preferences, active project pointer, and optional public backend endpoint URL (zero API keys or secrets).",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner." },
+        "displayName": { "type": "string", "description": "Workspace display label." },
+        "preferredLanguage": {
+          "type": "string",
+          "enum": ["AUTO", "EN", "BN", "BN_EN"],
+          "description": "Preferred interaction language."
+        },
+        "routingPolicy": {
+          "type": "string",
+          "enum": ["AUTO_BALANCED", "QUALITY_DEFAULT", "ULTRA_FAST"],
+          "description": "Model routing policy for Master AI Brain."
+        },
+        "activeProjectId": { "type": "string", "description": "Optional active project document ID." },
+        "backendServiceUrl": { "type": "string", "description": "Optional HTTPS URL of the user's deployed MYRAA backend & APK build server." },
+        "preferredBuildType": { "type": "string", "enum": ["DEBUG", "RELEASE"], "description": "Preferred Android APK build configuration." },
+        "defaultPackagePrefix": { "type": "string", "description": "Default reverse-DNS package prefix for new apps." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp of creation via FieldValue.serverTimestamp()." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp of last update via FieldValue.serverTimestamp()." }
+      },
+      "required": ["userId", "displayName", "preferredLanguage", "routingPolicy", "createdAt", "updatedAt"]
+    },
+    "BrainProject": {
+      "title": "BrainProject",
+      "description": "User-owned AppProject workspace and persistent Project Memory (zero secrets stored).",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "name": { "type": "string", "description": "App / project title." },
+        "targetFramework": {
+          "type": "string",
+          "enum": ["ANDROID_COMPOSE", "WEB_APP", "BACKEND_API", "FULLSTACK_SYSTEM"],
+          "description": "Target software platform."
+        },
+        "requirementsSummary": { "type": "string", "description": "Natural-language requirements captured from user." },
+        "detectedLanguage": {
+          "type": "string",
+          "enum": ["AUTO", "EN", "BN", "BN_EN"],
+          "description": "Detected prompt language."
+        },
+        "architectureSummary": { "type": "string", "description": "Generated architecture and component summary." },
+        "completedFeatures": { "type": "array", "description": "Completed task or feature list." },
+        "pendingFeatures": { "type": "array", "description": "Pending subtask or feature list." },
+        "status": {
+          "type": "string",
+          "enum": ["PLANNING", "ACTIVE", "PAUSED", "ARCHIVED"],
+          "description": "Lifecycle status of project memory."
+        },
+        "appCategory": { "type": "string", "description": "Optional app studio category (CHATTING, SOCIAL, AI_ASSISTANT, UTILITY, EDUCATION, BUSINESS, ECOMMERCE, GAME, CUSTOM)." },
+        "packageName": { "type": "string", "description": "Optional Android applicationId / package name." },
+        "appVersionName": { "type": "string", "description": "Optional Android versionName." },
+        "appVersionCode": { "type": "integer", "description": "Optional Android versionCode." },
+        "iconStyle": { "type": "string", "description": "Optional adaptive icon style preset." },
+        "selectedPermissions": { "type": "array", "description": "Optional bounded list of least-privilege Android permissions." },
+        "latestBuildJobId": { "type": "string", "description": "Optional ID of most recent BuildJob." },
+        "latestBuildStatus": { "type": "string", "description": "Optional latest build state." },
+        "fileCount": { "type": "integer", "description": "Optional count of tracked workspace files." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp of creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp of last update." }
+      },
+      "required": [
+        "userId",
+        "name",
+        "targetFramework",
+        "requirementsSummary",
+        "detectedLanguage",
+        "architectureSummary",
+        "completedFeatures",
+        "pendingFeatures",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "BrainMessage": {
+      "title": "BrainMessage",
+      "description": "Immutable conversational turn and orchestration telemetry within a Super Brain project.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "role": { "type": "string", "enum": ["USER", "BRAIN"] },
+        "content": { "type": "string" },
+        "detectedLanguage": { "type": "string", "enum": ["AUTO", "EN", "BN", "BN_EN"] },
+        "selectedProviderId": { "type": "string" },
+        "selectedModelId": { "type": "string" },
+        "intentSummary": { "type": "string" },
+        "assignedAgents": { "type": "array" },
+        "subtasks": { "type": "array" },
+        "latencyMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId", "projectId", "role", "content", "detectedLanguage",
+        "selectedProviderId", "selectedModelId", "intentSummary",
+        "assignedAgents", "subtasks", "latencyMs", "createdAt"
+      ]
+    },
+    "ProjectFile": {
+      "title": "ProjectFile",
+      "description": "Source, resource, manifest, or Gradle build file stored inside a user-owned AppProject workspace.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "path": { "type": "string", "description": "Relative POSIX file path inside project workspace." },
+        "fileName": { "type": "string" },
+        "language": { "type": "string", "description": "kotlin, xml, gradle, json, markdown, etc." },
+        "content": { "type": "string" },
+        "sizeBytes": { "type": "integer" },
+        "checksumSha256": { "type": "string" },
+        "updatedByAgent": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId", "projectId", "path", "fileName", "language", "content",
+        "sizeBytes", "checksumSha256", "updatedByAgent", "createdAt", "updatedAt"
+      ]
+    },
+    "ProjectVersion": {
+      "title": "ProjectVersion",
+      "description": "Immutable snapshot of workspace files enabling Undo & Restore version history.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "versionNumber": { "type": "integer" },
+        "summary": { "type": "string" },
+        "createdByAgent": { "type": "string" },
+        "fileEntries": { "type": "array", "description": "Bounded list of native map entries representing file snapshots." },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId", "projectId", "versionNumber", "summary",
+        "createdByAgent", "fileEntries", "createdAt"
+      ]
+    },
+    "BuildJob": {
+      "title": "BuildJob",
+      "description": "Tracked Android Gradle build job executed on the remote build server.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["QUEUED", "PREPARING_WORKSPACE", "RUNNING_GRADLE", "VALIDATING_APK", "SUCCEEDED", "FAILED"]
+        },
+        "buildType": { "type": "string", "enum": ["DEBUG", "RELEASE"] },
+        "appName": { "type": "string" },
+        "packageName": { "type": "string" },
+        "versionName": { "type": "string" },
+        "versionCode": { "type": "integer" },
+        "targetServerUrl": { "type": "string" },
+        "startedByModel": { "type": "string" },
+        "logSummary": { "type": "string" },
+        "errorSummary": { "type": "string" },
+        "durationMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId", "projectId", "status", "buildType", "appName", "packageName",
+        "versionName", "versionCode", "targetServerUrl", "startedByModel",
+        "logSummary", "errorSummary", "durationMs", "createdAt", "updatedAt"
+      ]
+    },
+    "BuildArtifact": {
+      "title": "BuildArtifact",
+      "description": "Immutable verified APK build artifact produced after Gradle succeeds on the build server.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "jobId": { "type": "string" },
+        "fileName": { "type": "string" },
+        "downloadUrl": { "type": "string" },
+        "sha256": { "type": "string" },
+        "sizeBytes": { "type": "integer" },
+        "buildType": { "type": "string", "enum": ["DEBUG", "RELEASE"] },
+        "apkVerified": { "type": "boolean" },
+        "expiresAtEpochMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId", "projectId", "jobId", "fileName", "downloadUrl", "sha256",
+        "sizeBytes", "buildType", "apkVerified", "expiresAtEpochMs", "createdAt"
+      ]
+    },
+    "UsageLog": {
+      "title": "UsageLog",
+      "description": "Provider routing, token, latency, and estimated cost telemetry log.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "providerId": { "type": "string" },
+        "modelId": { "type": "string" },
+        "taskRole": { "type": "string" },
+        "inputLanguage": { "type": "string", "enum": ["AUTO", "EN", "BN", "BN_EN"] },
+        "estimatedInputChars": { "type": "integer" },
+        "estimatedOutputChars": { "type": "integer" },
+        "latencyMs": { "type": "integer" },
+        "succeeded": { "type": "boolean" },
+        "promptTokens": { "type": "integer" },
+        "completionTokens": { "type": "integer" },
+        "estimatedCostUsdMicros": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId", "projectId", "providerId", "modelId", "taskRole",
+        "inputLanguage", "estimatedInputChars", "estimatedOutputChars",
+        "latencyMs", "succeeded", "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserWorkspace" },
+      "description": "User workspace configuration scoped strictly to owner UID."
+    },
+    "/users/{userId}/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/BrainProject" },
+      "description": "Persistent Project Memory and AppBuilder configuration for each user."
+    },
+    "/users/{userId}/projects/{projectId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/BrainMessage" },
+      "description": "Immutable conversation and orchestration turns under a project."
+    },
+    "/users/{userId}/projects/{projectId}/files/{fileId}": {
+      "schema": { "$ref": "#/entities/ProjectFile" },
+      "description": "Source, resource, and build files in a project workspace."
+    },
+    "/users/{userId}/projects/{projectId}/versions/{versionId}": {
+      "schema": { "$ref": "#/entities/ProjectVersion" },
+      "description": "Immutable snapshot history for project undo and restore."
+    },
+    "/users/{userId}/projects/{projectId}/build_jobs/{jobId}": {
+      "schema": { "$ref": "#/entities/BuildJob" },
+      "description": "Tracked Android Gradle build job records."
+    },
+    "/users/{userId}/projects/{projectId}/artifacts/{artifactId}": {
+      "schema": { "$ref": "#/entities/BuildArtifact" },
+      "description": "Verified APK download artifact metadata."
+    },
+    "/users/{userId}/usage_logs/{logId}": {
+      "schema": { "$ref": "#/entities/UsageLog" },
+      "description": "Model provider routing, token, and cost telemetry logs."
+    }
+  }
+}

@@ -1,0 +1,20 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Global default deny
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // Owner-isolated project source snapshots and APK artifacts
+    match /users/{userId}/projects/{projectId}/artifacts/{fileName} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      // Artifact uploads must come from authenticated admin SDK / build worker or strictly bounded owner writes
+      allow write: if request.auth != null &&
+                      request.auth.uid == userId &&
+                      fileName.matches('^[a-zA-Z0-9_\\.\\-]+\\.apk$') &&
+                      request.resource.size > 0 &&
+                      request.resource.size < 250 * 1024 * 1024;
+    }
+  }
+}

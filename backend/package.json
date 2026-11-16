@@ -1,0 +1,14 @@
+{
+  "name": "myraa-ai-super-brain-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MYRAA AI SUPER BRAIN secure multi-AI proxy and isolated Android Gradle APK build server",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/server.test.mjs"
+  }
+}
