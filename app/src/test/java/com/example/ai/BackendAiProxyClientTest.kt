@@ -207,5 +207,126 @@ class BackendAiProxyClientTest {
             com.example.ai.provider.classifyProviderError(offlineHealth.exceptionOrNull()!!)
         )
     }
+
+    @Test
+    fun expiredIdToken_triggersForceRefreshAndRetriesAuthenticatedRequests() = runBlocking {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val receivedAuthHeaders = mutableListOf<String>()
+        server.createContext("/health") { ex ->
+            val body = """{"service":"myraa-super-brain-backend","status":"ok","appCheckAutoRegistrarConfigured":true,"timestampEpochMs":999}""".toByteArray()
+            ex.sendResponseHeaders(200, body.size.toLong())
+            ex.responseBody.use { it.write(body) }
+        }
+        server.createContext("/v1/appcheck/registrar/status") { ex ->
+            val auth = ex.requestHeaders.getFirst("Authorization").orEmpty()
+            receivedAuthHeaders.add(auth)
+            if (auth != "Bearer refreshed_id_jwt") {
+                val err = """{"error":"Firebase ID token has expired."}""".toByteArray()
+                ex.sendResponseHeaders(401, err.size.toLong())
+                ex.responseBody.use { it.write(err) }
+                return@createContext
+            }
+            val ok = """
+                {
+                  "configured": true,
+                  "credentialMode": "SERVICE_ACCOUNT_ENV",
+                  "projectId": "gen-lang-client-0645829429",
+                  "androidPackage": "com.aistudio.myraa.qxkrmp",
+                  "reason": "Active"
+                }
+            """.trimIndent().toByteArray()
+            ex.sendResponseHeaders(200, ok.size.toLong())
+            ex.responseBody.use { it.write(ok) }
+        }
+        server.createContext("/v1/providers/status") { ex ->
+            val auth = ex.requestHeaders.getFirst("Authorization").orEmpty()
+            receivedAuthHeaders.add(auth)
+            if (auth != "Bearer refreshed_id_jwt") {
+                val err = """{"error":"Firebase ID token has expired."}""".toByteArray()
+                ex.sendResponseHeaders(401, err.size.toLong())
+                ex.responseBody.use { it.write(err) }
+                return@createContext
+            }
+            val ok = """{"providers":[]}""".toByteArray()
+            ex.sendResponseHeaders(200, ok.size.toLong())
+            ex.responseBody.use { it.write(ok) }
+        }
+        server.start()
+
+        try {
+            val baseUrl = "http://127.0.0.1:${server.address.port}"
+            val forceFlags = mutableListOf<Boolean>()
+            val client = BackendAiProxyClient(
+                tokenFetcher = com.example.core.security.FirebaseIdTokenFetcher { forceRefresh ->
+                    forceFlags.add(forceRefresh)
+                    if (forceRefresh) "refreshed_id_jwt" else "expired_id_jwt"
+                }
+            )
+
+            val health = client.checkHealth(baseUrl).getOrThrow()
+            assertTrue(health.appCheckAutoRegistrarConfigured)
+            assertTrue(health.latencyMs >= 1L)
+
+            val registrar = client.fetchRegistrarStatus(baseUrl).getOrThrow()
+            assertTrue(registrar.configured)
+            assertEquals("SERVICE_ACCOUNT_ENV", registrar.credentialMode)
+            assertTrue(registrar.tokenRefreshedOnRetry)
+            assertEquals(listOf(false, true), forceFlags)
+            assertEquals(listOf("Bearer expired_id_jwt", "Bearer refreshed_id_jwt"), receivedAuthHeaders)
+
+            val providers = client.probeProviders(baseUrl).getOrThrow()
+            assertTrue(providers.isEmpty())
+
+            // Persistent 401 after refresh surfaces FIREBASE_AUTH_REQUIRED cleanly
+            val alwaysRejectedClient = BackendAiProxyClient(
+                tokenFetcher = com.example.core.security.FirebaseIdTokenFetcher { "still_rejected_jwt" }
+            )
+            val failedReg = alwaysRejectedClient.fetchRegistrarStatus(baseUrl)
+            assertTrue(failedReg.isFailure)
+            val httpEx = failedReg.exceptionOrNull() as com.example.ai.provider.ProviderHttpException
+            assertEquals(401, httpEx.httpCode)
+            assertEquals("FIREBASE_AUTH_REQUIRED", httpEx.errorCode)
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun nonKeyErrors_preserveConfigurationUnavailableNetworkAndAppCheckCategories() {
+        assertEquals(
+            com.example.ai.provider.ProviderConnectionStatus.UNAVAILABLE,
+            com.example.ai.provider.mapStatusCodeToConnectionStatus(false, "CONFIGURATION_ERROR")
+        )
+        assertEquals(
+            com.example.ai.provider.ProviderConnectionStatus.UNAVAILABLE,
+            com.example.ai.provider.mapStatusCodeToConnectionStatus(false, "PROVIDER_UNAVAILABLE")
+        )
+        assertEquals(
+            com.example.ai.provider.ProviderConnectionStatus.OFFLINE,
+            com.example.ai.provider.mapStatusCodeToConnectionStatus(false, "NETWORK_ERROR")
+        )
+        assertEquals(
+            com.example.ai.provider.ProviderConnectionStatus.UNAVAILABLE,
+            com.example.ai.provider.mapStatusCodeToConnectionStatus(false, "APP_CHECK_REQUIRED")
+        )
+        assertEquals(
+            com.example.ai.provider.ProviderConnectionStatus.PROBE_ERROR,
+            com.example.ai.provider.mapStatusCodeToConnectionStatus(false, "INVALID_API_KEY")
+        )
+
+        val mismatch = BackendAiProxyClient.detectProviderKeyPrefixMismatch(
+            ProviderId.GROQ,
+            "sk-or-v1-example_openrouter_key"
+        )
+        assertTrue(mismatch != null && mismatch.contains("OpenRouter", ignoreCase = true) && mismatch.contains("gsk_"))
+        assertEquals(
+            null,
+            BackendAiProxyClient.detectProviderKeyPrefixMismatch(ProviderId.OPENROUTER_FREE, "sk-or-v1-example_openrouter_key")
+        )
+        assertEquals(
+            null,
+            BackendAiProxyClient.detectProviderKeyPrefixMismatch(ProviderId.GROQ, "gsk_example_groq_key")
+        )
+    }
 }
 

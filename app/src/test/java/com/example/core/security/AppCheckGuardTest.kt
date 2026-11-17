@@ -630,4 +630,53 @@ class AppCheckGuardTest {
         assertEquals(1, preFlightCount)
         assertEquals(1, blockCount)
     }
+
+    @Test
+    fun backendAppCheckRegistrarClient_refreshesExpiredIdTokenAndRetriesOn401() = runBlocking {
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        val authHeadersSeen = mutableListOf<String>()
+        server.createContext("/v1/appcheck/debug-tokens/register") { ex ->
+            val auth = ex.requestHeaders.getFirst("Authorization").orEmpty()
+            authHeadersSeen.add(auth)
+            if (auth != "Bearer fresh-firebase-jwt") {
+                val err = """{"error":"Firebase ID token has expired."}""".toByteArray()
+                ex.sendResponseHeaders(401, err.size.toLong())
+                ex.responseBody.use { it.write(err) }
+                return@createContext
+            }
+            val ok = """
+                {
+                  "registered": true,
+                  "alreadyRegistered": true,
+                  "prunedCount": 0,
+                  "tokenName": "projects/514839656668/apps/1:514839656668:android:fe8f5c54f44c419f555c19/debugTokens/xyz",
+                  "displayName": "[MYRAA-AUTO] TECNO BG6 (uid1)",
+                  "maskedToken": "85db9e7c-****"
+                }
+            """.trimIndent().toByteArray()
+            ex.sendResponseHeaders(200, ok.size.toLong())
+            ex.responseBody.use { it.write(ok) }
+        }
+        server.start()
+        val baseUrl = "http://127.0.0.1:${server.address.port}"
+
+        try {
+            val forceRefreshCalls = mutableListOf<Boolean>()
+            val client = BackendAppCheckRegistrarClient(
+                tokenFetcher = FirebaseIdTokenFetcher { force ->
+                    forceRefreshCalls.add(force)
+                    if (force) "fresh-firebase-jwt" else "expired-firebase-jwt"
+                },
+                deviceModelProvider = { "TECNO BG6" }
+            )
+
+            val res = client.registerDebugToken(baseUrl, "85db9e7c-1b4c-4296-bd09-2d106f22b2b4").getOrThrow()
+            assertTrue(res.registered)
+            assertTrue(res.tokenRefreshedOnRetry)
+            assertEquals(listOf(false, true), forceRefreshCalls)
+            assertEquals(listOf("Bearer expired-firebase-jwt", "Bearer fresh-firebase-jwt"), authHeadersSeen)
+        } finally {
+            server.stop(0)
+        }
+    }
 }

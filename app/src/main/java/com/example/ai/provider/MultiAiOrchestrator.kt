@@ -19,6 +19,13 @@ class MultiAiOrchestrator(
         return client.checkHealth(cleanUrl)
     }
 
+    suspend fun fetchBackendRegistrarStatus(backendServerUrl: String): Result<BackendRegistrarStatusInfo> {
+        val cleanUrl = backendServerUrl.trim()
+        val client = proxyClient
+            ?: return Result.failure(IllegalStateException("Backend proxy client unavailable."))
+        return client.fetchRegistrarStatus(cleanUrl)
+    }
+
     suspend fun refreshExternalProviderStatuses(
         backendServerUrl: String,
         freeOnly: Boolean = false

@@ -85,6 +85,9 @@ class MultiAiHubCoordinator(
                     isProbingBackend = false,
                     backendConnectionStatus = BackendConnectionStatus.NOT_CONFIGURED,
                     backendConnectionDetail = "Enter and save a valid HTTPS Backend Server URL first.",
+                    backendAuthDiagStatus = "Not checked (Backend URL missing)",
+                    backendRegistrarDiagStatus = "Not checked",
+                    backendHealthLatencyMs = null,
                     errorMessage = "Backend URL Missing: Enter and save your server URL above."
                 )
             }
@@ -99,6 +102,9 @@ class MultiAiHubCoordinator(
                     isProbingBackend = false,
                     backendConnectionStatus = BackendConnectionStatus.INVALID_URL,
                     backendConnectionDetail = validationError,
+                    backendAuthDiagStatus = "Skipped (Invalid URL)",
+                    backendRegistrarDiagStatus = "Not checked",
+                    backendHealthLatencyMs = null,
                     errorMessage = validationError
                 )
             }
@@ -125,6 +131,9 @@ class MultiAiHubCoordinator(
                     isTestingBackendConnection = false,
                     backendConnectionStatus = BackendConnectionStatus.NOT_CONFIGURED,
                     backendConnectionDetail = "No Remote Backend Server URL configured yet.",
+                    backendAuthDiagStatus = "Waiting for Backend URL",
+                    backendRegistrarDiagStatus = "Not checked",
+                    backendHealthLatencyMs = null,
                     lastProbeSummary = "Gemini Free Tier ready via App Check. External Free providers require Backend URL & API keys."
                 )
             }
@@ -139,6 +148,9 @@ class MultiAiHubCoordinator(
                     isTestingBackendConnection = false,
                     backendConnectionStatus = BackendConnectionStatus.INVALID_URL,
                     backendConnectionDetail = validationError,
+                    backendAuthDiagStatus = "Skipped (Invalid URL)",
+                    backendRegistrarDiagStatus = "Not checked",
+                    backendHealthLatencyMs = null,
                     errorMessage = validationError
                 )
             }
@@ -160,6 +172,8 @@ class MultiAiHubCoordinator(
                 isTestingBackendConnection = true,
                 backendConnectionStatus = BackendConnectionStatus.TESTING,
                 backendConnectionDetail = "Testing /health at $targetUrl...",
+                backendAuthDiagStatus = "Requesting Firebase ID token...",
+                backendRegistrarDiagStatus = "Pending /health...",
                 errorMessage = null
             )
         }
@@ -184,6 +198,10 @@ class MultiAiHubCoordinator(
                         BackendConnectionStatus.ERROR
                     },
                     backendConnectionDetail = detail,
+                    backendAuthDiagStatus = if (isOffline) "Skipped (Backend unreachable)" else "Blocked (/health failed)",
+                    backendRegistrarDiagStatus = "Unreachable",
+                    backendHealthLatencyMs = null,
+                    backendLastCheckedEpochMs = System.currentTimeMillis(),
                     probeStates = emptyList(),
                     lastProbeSummary = if (updateProbeSummary) detail else it.lastProbeSummary,
                     errorMessage = detail
@@ -202,6 +220,10 @@ class MultiAiHubCoordinator(
                     isTestingBackendConnection = false,
                     backendConnectionStatus = BackendConnectionStatus.ERROR,
                     backendConnectionDetail = detail,
+                    backendAuthDiagStatus = "Aborted (Incompatible /health response)",
+                    backendRegistrarDiagStatus = "Incompatible service (${health.service})",
+                    backendHealthLatencyMs = health.latencyMs,
+                    backendLastCheckedEpochMs = System.currentTimeMillis(),
                     probeStates = emptyList(),
                     errorMessage = detail
                 )
@@ -209,10 +231,30 @@ class MultiAiHubCoordinator(
             return
         }
 
+        val registrarResult = multiAiOrchestrator.fetchBackendRegistrarStatus(targetUrl)
+        val registrarInfo = registrarResult.getOrNull()
+        val registrarErr = registrarResult.exceptionOrNull() as? ProviderHttpException
+
         val probeResult = multiAiOrchestrator.refreshExternalProviderStatuses(targetUrl)
+        val nowCheckedMs = System.currentTimeMillis()
+        val registrarSummary = when {
+            registrarInfo != null && registrarInfo.configured ->
+                "Active (${registrarInfo.credentialMode})"
+            registrarInfo != null ->
+                "Inactive (${registrarInfo.reason.ifBlank { registrarInfo.credentialMode }})"
+            health.appCheckAutoRegistrarConfigured ->
+                "Configured (/health verified)"
+            else -> "Unavailable"
+        }
+
         probeResult.onSuccess { probes ->
             val freeProbes = probes.filter { it.freeTier }
             val connectedFree = freeProbes.count { it.status.isOperational }
+            val authNote = if (registrarInfo?.tokenRefreshedOnRetry == true) {
+                "Verified (Bearer JWT refreshed on retry)"
+            } else {
+                "Verified (Firebase ID Bearer JWT)"
+            }
             uiState.update { s ->
                 val clearedFeedback = s.providerVaultFeedback.filterValues { fb ->
                     fb.status != ProviderKeyVaultStatus.BACKEND_OFFLINE &&
@@ -222,7 +264,11 @@ class MultiAiHubCoordinator(
                     isProbingBackend = false,
                     isTestingBackendConnection = false,
                     backendConnectionStatus = BackendConnectionStatus.CONNECTED,
-                    backendConnectionDetail = "Connected to ${health.service} (/health ok) • $connectedFree/${freeProbes.size} Free providers active",
+                    backendConnectionDetail = "Connected to ${health.service} (/health ok • ${health.latencyMs}ms) • $connectedFree/${freeProbes.size} Free providers active",
+                    backendAuthDiagStatus = authNote,
+                    backendRegistrarDiagStatus = registrarSummary,
+                    backendHealthLatencyMs = health.latencyMs,
+                    backendLastCheckedEpochMs = nowCheckedMs,
                     probeStates = probes,
                     providerVaultFeedback = clearedFeedback,
                     lastProbeSummary = "Verified Free Proxy ($connectedFree/${freeProbes.size} Free external providers live & verified).",
@@ -231,25 +277,37 @@ class MultiAiHubCoordinator(
             }
         }.onFailure { err ->
             val classified = classifyProviderError(err)
+            val httpEx = generateSequence(err) { it.cause }
+                .filterIsInstance<ProviderHttpException>()
+                .firstOrNull() ?: registrarErr
             val isOffline = classified == ProviderConnectionStatus.OFFLINE
+            val isAuthFailure = httpEx?.errorCode == "FIREBASE_AUTH_REQUIRED" || httpEx?.httpCode == 401
             val detail = err.localizedMessage ?: "Authenticated provider probe failed."
             uiState.update { s ->
                 s.copy(
                     isProbingBackend = false,
                     isTestingBackendConnection = false,
-                    backendConnectionStatus = if (isOffline) {
-                        BackendConnectionStatus.OFFLINE
-                    } else {
-                        BackendConnectionStatus.CONNECTED
+                    backendConnectionStatus = when {
+                        isOffline -> BackendConnectionStatus.OFFLINE
+                        isAuthFailure -> BackendConnectionStatus.ERROR
+                        else -> BackendConnectionStatus.CONNECTED
                     },
-                    backendConnectionDetail = if (isOffline) {
-                        "Backend Offline: $detail"
-                    } else {
-                        "Connected to ${health.service} (/health ok) • Provider check note: $detail"
+                    backendConnectionDetail = when {
+                        isOffline -> "Backend Offline: $detail"
+                        isAuthFailure -> "Firebase Auth required/rejected (401): $detail"
+                        else -> "Connected to ${health.service} (/health ok • ${health.latencyMs}ms) • Provider check note: $detail"
                     },
+                    backendAuthDiagStatus = when {
+                        isOffline -> "Network unreachable"
+                        isAuthFailure -> "Auth failed (${httpEx?.message ?: "401 Bearer rejected"})"
+                        else -> "Auth checked (${detail.take(60)})"
+                    },
+                    backendRegistrarDiagStatus = registrarSummary,
+                    backendHealthLatencyMs = health.latencyMs,
+                    backendLastCheckedEpochMs = nowCheckedMs,
                     probeStates = emptyList(),
                     lastProbeSummary = "Server /health OK, provider probe note: $detail",
-                    statusMessage = if (!isOffline) "Backend /health reachable (${health.service})." else null,
+                    statusMessage = if (!isOffline && !isAuthFailure) "Backend /health reachable (${health.service})." else null,
                     errorMessage = detail
                 )
             }
@@ -329,6 +387,22 @@ class MultiAiHubCoordinator(
             return
         }
 
+        val prefixMismatch = BackendAiProxyClient.detectProviderKeyPrefixMismatch(providerId, cleanKey)
+        if (prefixMismatch != null) {
+            uiState.update {
+                it.copy(
+                    errorMessage = prefixMismatch,
+                    providerVaultFeedback = it.providerVaultFeedback + (
+                        providerId.wireId to ProviderVaultFeedback(
+                            status = ProviderKeyVaultStatus.SAVE_FAILED,
+                            message = prefixMismatch
+                        )
+                        )
+                )
+            }
+            return
+        }
+
         if (uiState.value.keyMutationBusyProviderId != null) return
 
         scope.launch {
@@ -352,29 +426,35 @@ class MultiAiHubCoordinator(
                 accountId = cleanAccountId
             )
             result.onSuccess { probeState ->
+                val isInvalidKey = probeState.statusCode.equals("INVALID_API_KEY", ignoreCase = true) ||
+                    probeState.statusCode.equals("INVALID_KEY", ignoreCase = true) ||
+                    probeState.errorCategory.equals("INVALID_KEY", ignoreCase = true)
+                val isNetworkOffline = probeState.statusCode.equals("OFFLINE", ignoreCase = true) ||
+                    probeState.statusCode.equals("NETWORK_ERROR", ignoreCase = true) ||
+                    probeState.errorCategory.equals("NETWORK_ERROR", ignoreCase = true) ||
+                    probeState.status == ProviderConnectionStatus.OFFLINE
                 val feedback = when {
                     probeState.status.isOperational -> ProviderVaultFeedback(
                         status = ProviderKeyVaultStatus.VERIFIED,
                         message = "Verified & encrypted in backend vault (${probeState.maskedKeyHint}).",
                         clearDraftToken = System.nanoTime()
                     )
-                    probeState.statusCode.equals("INVALID_API_KEY", ignoreCase = true) ||
-                        probeState.status == ProviderConnectionStatus.PROBE_ERROR -> ProviderVaultFeedback(
+                    isInvalidKey -> ProviderVaultFeedback(
                         status = ProviderKeyVaultStatus.INVALID_API_KEY,
                         message = probeState.diagnosticMessage.ifBlank {
                             "${providerId.displayName} rejected this API key (401/403). Key was not saved."
                         }
                     )
-                    probeState.status == ProviderConnectionStatus.OFFLINE -> ProviderVaultFeedback(
+                    isNetworkOffline -> ProviderVaultFeedback(
                         status = ProviderKeyVaultStatus.BACKEND_OFFLINE,
                         message = probeState.diagnosticMessage.ifBlank {
-                            "Backend or ${providerId.displayName} endpoint is offline."
+                            "Network error reaching ${providerId.displayName} endpoint."
                         }
                     )
                     else -> ProviderVaultFeedback(
                         status = ProviderKeyVaultStatus.SAVE_FAILED,
                         message = probeState.diagnosticMessage.ifBlank {
-                            "Verification returned ${probeState.status.label}."
+                            "Verification returned ${probeState.statusCode}."
                         }
                     )
                 }
@@ -409,7 +489,8 @@ class MultiAiHubCoordinator(
                     ?: "Failed to save encrypted key for ${providerId.displayName}."
                 val failureStatus = when {
                     classified == ProviderConnectionStatus.OFFLINE -> ProviderKeyVaultStatus.BACKEND_OFFLINE
-                    httpEx?.errorCode == "INVALID_API_KEY" -> ProviderKeyVaultStatus.INVALID_API_KEY
+                    httpEx?.errorCode == "INVALID_API_KEY" || httpEx?.errorCode == "INVALID_KEY" ->
+                        ProviderKeyVaultStatus.INVALID_API_KEY
                     else -> ProviderKeyVaultStatus.SAVE_FAILED
                 }
 

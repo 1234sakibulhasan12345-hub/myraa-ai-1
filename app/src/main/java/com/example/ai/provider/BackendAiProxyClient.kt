@@ -1,14 +1,13 @@
 package com.example.ai.provider
 
+import com.example.core.security.FirebaseIdTokenFetcher
+import com.example.core.security.FirebaseIdTokenProvider
 import com.example.core.security.getAppCheckTokenBestEffort
-import com.google.firebase.Firebase
-import com.google.firebase.auth.auth
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -28,7 +27,18 @@ import java.util.concurrent.TimeUnit
 data class BackendHealthInfo(
     val service: String,
     val status: String,
-    val timestampEpochMs: Long
+    val timestampEpochMs: Long,
+    val appCheckAutoRegistrarConfigured: Boolean = false,
+    val latencyMs: Long = 0L
+)
+
+data class BackendRegistrarStatusInfo(
+    val configured: Boolean,
+    val credentialMode: String,
+    val projectId: String,
+    val androidPackage: String,
+    val reason: String,
+    val tokenRefreshedOnRetry: Boolean = false
 )
 
 data class ProxyTextResult(
@@ -53,9 +63,10 @@ fun mapStatusCodeToConnectionStatus(
         "MISSING_API_KEY", "NOT_CONFIGURED_MISSING_KEY" -> ProviderConnectionStatus.MISSING_API_KEY
         "RATE_LIMITED" -> ProviderConnectionStatus.RATE_LIMITED
         "QUOTA_EXPIRED" -> ProviderConnectionStatus.QUOTA_EXPIRED
-        "OFFLINE" -> ProviderConnectionStatus.OFFLINE
-        "UNAVAILABLE" -> ProviderConnectionStatus.UNAVAILABLE
-        "INVALID_API_KEY", "PROBE_FAILED" -> ProviderConnectionStatus.PROBE_ERROR
+        "OFFLINE", "NETWORK_ERROR" -> ProviderConnectionStatus.OFFLINE
+        "UNAVAILABLE", "PROVIDER_UNAVAILABLE", "CONFIGURATION_ERROR", "PROBE_FAILED",
+        "FIREBASE_AUTH_REQUIRED", "APP_CHECK_REQUIRED" -> ProviderConnectionStatus.UNAVAILABLE
+        "INVALID_API_KEY", "INVALID_KEY" -> ProviderConnectionStatus.PROBE_ERROR
         else -> ProviderConnectionStatus.PLANNED_PART_02
     }
 }
@@ -68,10 +79,15 @@ fun classifyProviderError(throwable: Throwable): ProviderConnectionStatus {
             httpEx.errorCode == "MISSING_API_KEY" -> ProviderConnectionStatus.MISSING_API_KEY
             httpEx.errorCode == "RATE_LIMITED" || httpEx.httpCode == 429 -> ProviderConnectionStatus.RATE_LIMITED
             httpEx.errorCode == "QUOTA_EXPIRED" || httpEx.httpCode == 402 -> ProviderConnectionStatus.QUOTA_EXPIRED
-            httpEx.errorCode == "INVALID_API_KEY" || httpEx.httpCode == 401 -> ProviderConnectionStatus.PROBE_ERROR
-            httpEx.errorCode == "OFFLINE" -> ProviderConnectionStatus.OFFLINE
-            httpEx.errorCode == "UNAVAILABLE" || httpEx.httpCode in setOf(500, 502, 503, 504) -> ProviderConnectionStatus.UNAVAILABLE
-            else -> ProviderConnectionStatus.PROBE_ERROR
+            httpEx.errorCode == "INVALID_API_KEY" || httpEx.errorCode == "INVALID_KEY" ->
+                ProviderConnectionStatus.PROBE_ERROR
+            httpEx.errorCode == "FIREBASE_AUTH_REQUIRED" || httpEx.errorCode == "APP_CHECK_REQUIRED" ||
+                httpEx.errorCode == "CONFIGURATION_ERROR" ->
+                ProviderConnectionStatus.UNAVAILABLE
+            httpEx.errorCode == "OFFLINE" || httpEx.errorCode == "NETWORK_ERROR" -> ProviderConnectionStatus.OFFLINE
+            httpEx.errorCode == "UNAVAILABLE" || httpEx.errorCode == "PROVIDER_UNAVAILABLE" ||
+                httpEx.httpCode in setOf(500, 502, 503, 504) -> ProviderConnectionStatus.UNAVAILABLE
+            else -> ProviderConnectionStatus.UNAVAILABLE
         }
     }
 
@@ -98,24 +114,31 @@ fun classifyProviderError(throwable: Throwable): ProviderConnectionStatus {
 }
 
 class BackendAiProxyClient(
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(90, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build(),
-    private val tokenProvider: suspend () -> String? = {
-        Firebase.auth.currentUser?.getIdToken(false)?.await()?.token
-    },
+    private val httpClient: OkHttpClient = defaultHttpClient(),
+    private val tokenFetcher: FirebaseIdTokenFetcher = FirebaseIdTokenProvider.defaultFetcher(),
     private val appCheckTokenProvider: suspend () -> String? = {
         getAppCheckTokenBestEffort(forceRefresh = false)
     }
 ) {
+    constructor(
+        httpClient: OkHttpClient = defaultHttpClient(),
+        tokenProvider: suspend () -> String?,
+        appCheckTokenProvider: suspend () -> String? = {
+            getAppCheckTokenBestEffort(forceRefresh = false)
+        }
+    ) : this(
+        httpClient = httpClient,
+        tokenFetcher = FirebaseIdTokenFetcher { _ -> tokenProvider() },
+        appCheckTokenProvider = appCheckTokenProvider
+    )
+
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     suspend fun checkHealth(baseUrl: String): Result<BackendHealthInfo> = withContext(Dispatchers.IO) {
         runCatching {
             val cleanBase = requireValidUrl(baseUrl)
             val req = Request.Builder().url("$cleanBase/health").get().build()
+            val startedMs = System.currentTimeMillis()
             try {
                 httpClient.newCall(req).execute().use { resp ->
                     val raw = resp.body?.string().orEmpty()
@@ -126,7 +149,41 @@ class BackendAiProxyClient(
                     BackendHealthInfo(
                         service = json.optString("service", "myraa-backend"),
                         status = json.optString("status", "unknown"),
-                        timestampEpochMs = json.optLong("timestampEpochMs", System.currentTimeMillis())
+                        timestampEpochMs = json.optLong("timestampEpochMs", System.currentTimeMillis()),
+                        appCheckAutoRegistrarConfigured = json.optBoolean("appCheckAutoRegistrarConfigured", false),
+                        latencyMs = (System.currentTimeMillis() - startedMs).coerceAtLeast(1L)
+                    )
+                }
+            } catch (io: IOException) {
+                throw ProviderHttpException(503, "OFFLINE", "Backend server unreachable: ${io.localizedMessage}", io)
+            }
+        }
+    }
+
+    suspend fun fetchRegistrarStatus(baseUrl: String): Result<BackendRegistrarStatusInfo> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanBase = requireValidUrl(baseUrl)
+            try {
+                val outcome = executeAuthenticated { bearer ->
+                    Request.Builder()
+                        .url("$cleanBase/v1/appcheck/registrar/status")
+                        .header("Authorization", "Bearer $bearer")
+                        .get()
+                        .build()
+                }
+                outcome.response.use { resp ->
+                    val raw = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        throw parseHttpError(resp.code, raw, "Registrar status check failed: HTTP ${resp.code}")
+                    }
+                    val json = JSONObject(raw)
+                    BackendRegistrarStatusInfo(
+                        configured = json.optBoolean("configured", false),
+                        credentialMode = json.optString("credentialMode", "NONE"),
+                        projectId = json.optString("projectId", ""),
+                        androidPackage = json.optString("androidPackage", ""),
+                        reason = json.optString("reason", ""),
+                        tokenRefreshedOnRetry = outcome.tokenRefreshedOnRetry
                     )
                 }
             } catch (io: IOException) {
@@ -142,22 +199,24 @@ class BackendAiProxyClient(
     ): Result<List<ProviderLiveProbeState>> = withContext(Dispatchers.IO) {
         runCatching {
             val cleanBase = requireValidUrl(baseUrl)
-            val bearer = requireBearerToken()
             val appCheckToken = appCheckTokenProvider()?.takeIf { it.isNotBlank() }
             val query = buildString {
                 append("probe=").append(if (liveProbe) "true" else "false")
                 if (freeOnly) append("&freeOnly=true")
             }
-            val reqBuilder = Request.Builder()
-                .url("$cleanBase/v1/providers/status?$query")
-                .header("Authorization", "Bearer $bearer")
-                .get()
-            if (appCheckToken != null) {
-                reqBuilder.header("X-Firebase-AppCheck", appCheckToken)
-            }
 
             try {
-                httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                val outcome = executeAuthenticated { bearer ->
+                    Request.Builder()
+                        .url("$cleanBase/v1/providers/status?$query")
+                        .header("Authorization", "Bearer $bearer")
+                        .apply {
+                            if (appCheckToken != null) header("X-Firebase-AppCheck", appCheckToken)
+                        }
+                        .get()
+                        .build()
+                }
+                outcome.response.use { resp ->
                     val raw = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) {
                         throw parseHttpError(resp.code, raw, "Provider probe failed with HTTP ${resp.code}")
@@ -178,18 +237,20 @@ class BackendAiProxyClient(
     suspend fun fetchProviderKeySummaries(baseUrl: String): Result<List<ProviderKeySummary>> = withContext(Dispatchers.IO) {
         runCatching {
             val cleanBase = requireValidUrl(baseUrl)
-            val bearer = requireBearerToken()
             val appCheckToken = appCheckTokenProvider()?.takeIf { it.isNotBlank() }
-            val reqBuilder = Request.Builder()
-                .url("$cleanBase/v1/providers/keys")
-                .header("Authorization", "Bearer $bearer")
-                .get()
-            if (appCheckToken != null) {
-                reqBuilder.header("X-Firebase-AppCheck", appCheckToken)
-            }
 
             try {
-                httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                val outcome = executeAuthenticated { bearer ->
+                    Request.Builder()
+                        .url("$cleanBase/v1/providers/keys")
+                        .header("Authorization", "Bearer $bearer")
+                        .apply {
+                            if (appCheckToken != null) header("X-Firebase-AppCheck", appCheckToken)
+                        }
+                        .get()
+                        .build()
+                }
+                outcome.response.use { resp ->
                     val raw = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) {
                         throw parseHttpError(resp.code, raw, "Failed to load key status: HTTP ${resp.code}")
@@ -232,25 +293,27 @@ class BackendAiProxyClient(
                 require(accountId.trim().isNotBlank()) { "Cloudflare Account ID is required along with API Token." }
             }
 
-            val bearer = requireBearerToken()
             val appCheckToken = appCheckTokenProvider()?.takeIf { it.isNotBlank() }
-            val payload = JSONObject().apply {
+            val payloadStr = JSONObject().apply {
                 put("providerId", providerId.wireId)
                 put("apiKey", cleanKey)
                 if (accountId.isNotBlank()) {
                     put("accountId", accountId.trim())
                 }
-            }
-            val reqBuilder = Request.Builder()
-                .url("$cleanBase/v1/providers/keys")
-                .header("Authorization", "Bearer $bearer")
-                .post(payload.toString().toRequestBody(jsonMediaType))
-            if (appCheckToken != null) {
-                reqBuilder.header("X-Firebase-AppCheck", appCheckToken)
-            }
+            }.toString()
 
             try {
-                httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                val outcome = executeAuthenticated { bearer ->
+                    Request.Builder()
+                        .url("$cleanBase/v1/providers/keys")
+                        .header("Authorization", "Bearer $bearer")
+                        .apply {
+                            if (appCheckToken != null) header("X-Firebase-AppCheck", appCheckToken)
+                        }
+                        .post(payloadStr.toRequestBody(jsonMediaType))
+                        .build()
+                }
+                outcome.response.use { resp ->
                     val raw = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) {
                         throw parseHttpError(resp.code, raw, "Failed to store API key: HTTP ${resp.code}")
@@ -271,18 +334,20 @@ class BackendAiProxyClient(
     ): Result<ProviderLiveProbeState> = withContext(Dispatchers.IO) {
         runCatching {
             val cleanBase = requireValidUrl(baseUrl)
-            val bearer = requireBearerToken()
             val appCheckToken = appCheckTokenProvider()?.takeIf { it.isNotBlank() }
-            val reqBuilder = Request.Builder()
-                .url("$cleanBase/v1/providers/keys/${providerId.wireId}")
-                .header("Authorization", "Bearer $bearer")
-                .delete()
-            if (appCheckToken != null) {
-                reqBuilder.header("X-Firebase-AppCheck", appCheckToken)
-            }
 
             try {
-                httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                val outcome = executeAuthenticated { bearer ->
+                    Request.Builder()
+                        .url("$cleanBase/v1/providers/keys/${providerId.wireId}")
+                        .header("Authorization", "Bearer $bearer")
+                        .apply {
+                            if (appCheckToken != null) header("X-Firebase-AppCheck", appCheckToken)
+                        }
+                        .delete()
+                        .build()
+                }
+                outcome.response.use { resp ->
                     val raw = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) {
                         throw parseHttpError(resp.code, raw, "Failed to delete API key: HTTP ${resp.code}")
@@ -308,27 +373,29 @@ class BackendAiProxyClient(
     ): Result<ProxyTextResult> = withContext(Dispatchers.IO) {
         runCatching {
             val cleanBase = requireValidUrl(baseUrl)
-            val bearer = requireBearerToken()
             val appCheckToken = appCheckTokenProvider()?.takeIf { it.isNotBlank() }
-            val payload = JSONObject().apply {
+            val payloadStr = JSONObject().apply {
                 put("providerId", providerId.wireId)
                 put("modelId", modelId)
                 put("systemPrompt", systemPrompt)
                 put("prompt", prompt)
                 put("jsonMode", jsonMode)
                 if (allowFallback) put("allowFallback", true)
-            }
+            }.toString()
             val endpoint = if (jsonMode) "$cleanBase/v1/ai/plan" else "$cleanBase/v1/ai/generate"
-            val reqBuilder = Request.Builder()
-                .url(endpoint)
-                .header("Authorization", "Bearer $bearer")
-                .post(payload.toString().toRequestBody(jsonMediaType))
-            if (appCheckToken != null) {
-                reqBuilder.header("X-Firebase-AppCheck", appCheckToken)
-            }
 
             try {
-                httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                val outcome = executeAuthenticated { bearer ->
+                    Request.Builder()
+                        .url(endpoint)
+                        .header("Authorization", "Bearer $bearer")
+                        .apply {
+                            if (appCheckToken != null) header("X-Firebase-AppCheck", appCheckToken)
+                        }
+                        .post(payloadStr.toRequestBody(jsonMediaType))
+                        .build()
+                }
+                outcome.response.use { resp ->
                     val raw = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) {
                         throw parseHttpError(resp.code, raw, "Proxy AI call failed: HTTP ${resp.code}")
@@ -366,26 +433,28 @@ class BackendAiProxyClient(
         allowFallback: Boolean = false
     ): Flow<String> = flow {
         val cleanBase = requireValidUrl(baseUrl)
-        val bearer = requireBearerToken()
         val appCheckToken = appCheckTokenProvider()?.takeIf { it.isNotBlank() }
-        val payload = JSONObject().apply {
+        val payloadStr = JSONObject().apply {
             put("providerId", providerId.wireId)
             put("modelId", modelId)
             put("systemPrompt", systemPrompt)
             put("prompt", prompt)
             if (allowFallback) put("allowFallback", true)
-        }
-        val reqBuilder = Request.Builder()
-            .url("$cleanBase/v1/ai/stream")
-            .header("Authorization", "Bearer $bearer")
-            .post(payload.toString().toRequestBody(jsonMediaType))
-        if (appCheckToken != null) {
-            reqBuilder.header("X-Firebase-AppCheck", appCheckToken)
-        }
+        }.toString()
 
         val accumulated = StringBuilder()
         try {
-            httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+            val outcome = executeAuthenticated { bearer ->
+                Request.Builder()
+                    .url("$cleanBase/v1/ai/stream")
+                    .header("Authorization", "Bearer $bearer")
+                    .apply {
+                        if (appCheckToken != null) header("X-Firebase-AppCheck", appCheckToken)
+                    }
+                    .post(payloadStr.toRequestBody(jsonMediaType))
+                    .build()
+            }
+            outcome.response.use { resp ->
                 if (!resp.isSuccessful) {
                     val raw = resp.body?.string().orEmpty()
                     throw parseHttpError(resp.code, raw, "Proxy SSE stream failed: HTTP ${resp.code}")
@@ -419,6 +488,20 @@ class BackendAiProxyClient(
         }
     }.flowOn(Dispatchers.IO)
 
+    private suspend fun executeAuthenticated(requestFactory: suspend (bearerToken: String) -> Request) =
+        FirebaseIdTokenProvider.executeWithBearerRetry(
+            httpClient = httpClient,
+            tokenFetcher = tokenFetcher,
+            onMissingToken = {
+                ProviderHttpException(
+                    httpCode = 401,
+                    errorCode = "FIREBASE_AUTH_REQUIRED",
+                    message = "Google Sign-In Firebase ID Token is required to call backend proxy."
+                )
+            },
+            requestFactory = requestFactory
+        )
+
     private fun parseProviderProbeJson(item: JSONObject, nowEpochMs: Long): ProviderLiveProbeState? {
         val pid = ProviderId.fromWire(item.optString("providerId")) ?: return null
         val connected = item.optBoolean("connected", false)
@@ -436,6 +519,8 @@ class BackendAiProxyClient(
             emptyList()
         }
 
+        val errorCategory = item.optString("errorCategory", "")
+
         val resolvedStatus = mapStatusCodeToConnectionStatus(connected, code)
         return ProviderLiveProbeState(
             providerId = pid,
@@ -448,7 +533,8 @@ class BackendAiProxyClient(
             requiresAccountId = requiresAccountId,
             hasAccountId = hasAccountId,
             discoveredModels = discoveredModels,
-            freeTier = freeTier
+            freeTier = freeTier,
+            errorCategory = errorCategory
         )
     }
 
@@ -456,23 +542,46 @@ class BackendAiProxyClient(
         val json = runCatching { JSONObject(rawBody) }.getOrNull()
         val msg = json?.optString("error")?.takeIf { it.isNotBlank() } ?: fallbackMsg
         val rawCode = json?.optString("errorCode")?.takeIf { it.isNotBlank() }
-        val resolvedCode = rawCode ?: when (httpCode) {
-            401 -> "INVALID_API_KEY"
-            402 -> "QUOTA_EXPIRED"
-            429 -> "RATE_LIMITED"
-            502, 503, 504 -> "UNAVAILABLE"
+        val isAppCheckAuthError = httpCode == 401 && rawCode == null && (
+            msg.contains("App Check", ignoreCase = true) ||
+                msg.contains("AppCheck", ignoreCase = true) ||
+                msg.contains("attestation", ignoreCase = true)
+            )
+        val isFirebaseAuthError = httpCode == 401 && rawCode == null && !isAppCheckAuthError && (
+            msg.contains("Firebase ID token", ignoreCase = true) ||
+                msg.contains("Bearer", ignoreCase = true) ||
+                msg.contains("JWT", ignoreCase = true) ||
+                msg.contains("signing key", ignoreCase = true) ||
+                msg.contains("audience", ignoreCase = true) ||
+                msg.contains("issuer", ignoreCase = true) ||
+                msg.contains("subject claim", ignoreCase = true) ||
+                msg.contains("token algorithm", ignoreCase = true)
+            )
+        val isExplicitApiKeyMsg = msg.contains("api key", ignoreCase = true) ||
+            msg.contains("api_key", ignoreCase = true) ||
+            msg.contains("invalid key", ignoreCase = true)
+        val resolvedCode = rawCode ?: when {
+            isAppCheckAuthError -> "APP_CHECK_REQUIRED"
+            isFirebaseAuthError -> "FIREBASE_AUTH_REQUIRED"
+            httpCode == 401 && isExplicitApiKeyMsg -> "INVALID_API_KEY"
+            httpCode == 401 -> "FIREBASE_AUTH_REQUIRED"
+            httpCode == 402 -> "QUOTA_EXPIRED"
+            httpCode == 429 -> "RATE_LIMITED"
+            httpCode in setOf(400, 403, 404, 410, 422) -> "CONFIGURATION_ERROR"
+            httpCode in setOf(502, 503, 504) -> "UNAVAILABLE"
             else -> "PROBE_FAILED"
         }
         return ProviderHttpException(httpCode = httpCode, errorCode = resolvedCode, message = msg)
     }
 
-    private suspend fun requireBearerToken(): String {
-        return tokenProvider()?.takeIf { it.isNotBlank() }
-            ?: throw IllegalStateException("Google Sign-In Firebase ID Token is required to call backend proxy.")
-    }
-
     companion object {
         private val LOCAL_HTTP_HOSTS = setOf("127.0.0.1", "10.0.2.2", "localhost")
+
+        private fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(90, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .build()
 
         fun validateBackendUrlError(rawUrl: String): String? {
             val trimmed = rawUrl.trim().trimEnd('/')
@@ -483,7 +592,7 @@ class BackendAiProxyClient(
                 return "Backend URL cannot contain spaces."
             }
             val parsed = runCatching { URI(trimmed) }.getOrNull()
-                ?: return "Invalid URL syntax. Example: https://myraa-backend.run.app"
+                ?: return "Invalid URL syntax. Example: https://myraa-super-brain-backend.onrender.com"
             val scheme = parsed.scheme?.lowercase(Locale.ROOT).orEmpty()
             val host = parsed.host?.lowercase(Locale.ROOT).orEmpty()
             if (host.isBlank()) {
@@ -505,6 +614,22 @@ class BackendAiProxyClient(
             val error = validateBackendUrlError(trimmed)
             require(error == null) { error ?: "Invalid backend URL." }
             return trimmed
+        }
+
+        fun detectProviderKeyPrefixMismatch(providerId: ProviderId, rawKey: String): String? {
+            val key = rawKey.trim()
+            if (key.isEmpty()) return null
+            return when {
+                key.startsWith("sk-or-") && providerId != ProviderId.OPENROUTER_FREE ->
+                    "Wrong provider card: keys starting with 'sk-or-' are OpenRouter keys, not ${providerId.displayName}. Paste this key under OpenRouter Free Models below${if (providerId == ProviderId.GROQ) ", or enter a Groq key starting with 'gsk_'" else ""}."
+                key.startsWith("gsk_") && providerId != ProviderId.GROQ ->
+                    "Wrong provider card: keys starting with 'gsk_' are Groq keys, not ${providerId.displayName}. Paste this key under Groq above."
+                key.startsWith("nvapi-") && providerId != ProviderId.NVIDIA_NIM ->
+                    "Wrong provider card: keys starting with 'nvapi-' are NVIDIA NIM keys, not ${providerId.displayName}. Paste this key under NVIDIA NIM."
+                key.startsWith("sk-ant-") && providerId != ProviderId.ANTHROPIC_CLAUDE ->
+                    "Wrong provider card: keys starting with 'sk-ant-' are Anthropic keys, not ${providerId.displayName}."
+                else -> null
+            }
         }
     }
 }

@@ -3,11 +3,8 @@ package com.example.core.security
 import android.os.Build
 import android.util.Log
 import com.example.ai.provider.BackendAiProxyClient
-import com.google.firebase.Firebase
-import com.google.firebase.auth.auth
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -28,7 +25,8 @@ data class AppCheckAutoRegisterResponse(
     val prunedCount: Int,
     val tokenName: String,
     val displayName: String,
-    val maskedToken: String
+    val maskedToken: String,
+    val tokenRefreshedOnRetry: Boolean = false
 )
 
 class AppCheckBackendRegistrarException(
@@ -44,27 +42,20 @@ fun maskAppCheckSecret(secret: String?): String {
 }
 
 class BackendAppCheckRegistrarClient(
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
-        .build(),
-    private val idTokenProvider: suspend () -> String? = {
-        runCatching {
-            Firebase.auth.currentUser?.getIdToken(false)?.await()?.token
-        }.getOrNull()
-    },
-    private val deviceModelProvider: () -> String = {
-        val manufacturer = Build.MANUFACTURER.orEmpty().trim()
-        val model = Build.MODEL.orEmpty().trim()
-        when {
-            manufacturer.isBlank() && model.isBlank() -> "Android Phone"
-            model.startsWith(manufacturer, ignoreCase = true) -> model
-            manufacturer.isBlank() -> model
-            else -> "$manufacturer $model"
-        }
-    }
+    private val httpClient: OkHttpClient = defaultHttpClient(),
+    private val tokenFetcher: FirebaseIdTokenFetcher = FirebaseIdTokenProvider.defaultFetcher(),
+    private val deviceModelProvider: () -> String = { defaultDeviceModel() }
 ) {
+    constructor(
+        httpClient: OkHttpClient = defaultHttpClient(),
+        idTokenProvider: suspend () -> String?,
+        deviceModelProvider: () -> String = { defaultDeviceModel() }
+    ) : this(
+        httpClient = httpClient,
+        tokenFetcher = FirebaseIdTokenFetcher { _ -> idTokenProvider() },
+        deviceModelProvider = deviceModelProvider
+    )
+
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     suspend fun registerDebugToken(
@@ -76,29 +67,34 @@ class BackendAppCheckRegistrarClient(
             val cleanToken = debugToken.trim().lowercase()
             require(cleanToken.isNotBlank()) { "Debug token cannot be blank." }
 
-            val bearer = idTokenProvider()?.takeIf { it.isNotBlank() }
-                ?: throw AppCheckBackendRegistrarException(
-                    httpCode = 401,
-                    errorCode = "NO_FIREBASE_USER",
-                    message = "Sign in with Google first so MYRAA can authenticate automatic App Check registration."
-                )
-
-            val payload = JSONObject().apply {
+            val payloadJson = JSONObject().apply {
                 put("debugToken", cleanToken)
                 put("deviceModel", deviceModelProvider())
                 put("packageName", MYRAA_ANDROID_PACKAGE)
                 put("appId", MYRAA_ANDROID_APP_ID)
-            }
-
-            val req = Request.Builder()
-                .url("$cleanBase/v1/appcheck/debug-tokens/register")
-                .header("Authorization", "Bearer $bearer")
-                .post(payload.toString().toRequestBody(jsonMediaType))
-                .build()
+            }.toString()
 
             Log.d(TAG, "Submitting automatic App Check registration (${maskAppCheckSecret(cleanToken)})")
 
-            httpClient.newCall(req).execute().use { resp ->
+            val outcome = FirebaseIdTokenProvider.executeWithBearerRetry(
+                httpClient = httpClient,
+                tokenFetcher = tokenFetcher,
+                onMissingToken = {
+                    AppCheckBackendRegistrarException(
+                        httpCode = 401,
+                        errorCode = "NO_FIREBASE_USER",
+                        message = "Sign in with Google first so MYRAA can authenticate automatic App Check registration."
+                    )
+                }
+            ) { bearer ->
+                Request.Builder()
+                    .url("$cleanBase/v1/appcheck/debug-tokens/register")
+                    .header("Authorization", "Bearer $bearer")
+                    .post(payloadJson.toRequestBody(jsonMediaType))
+                    .build()
+            }
+
+            outcome.response.use { resp ->
                 val raw = resp.body?.string().orEmpty()
                 val json = runCatching { JSONObject(raw) }.getOrNull()
                 if (!resp.isSuccessful) {
@@ -128,7 +124,8 @@ class BackendAppCheckRegistrarClient(
                         prunedCount = json.optInt("prunedCount", 0),
                         tokenName = json.optString("tokenName", ""),
                         displayName = json.optString("displayName", ""),
-                        maskedToken = json.optString("maskedToken", maskAppCheckSecret(cleanToken))
+                        maskedToken = json.optString("maskedToken", maskAppCheckSecret(cleanToken)),
+                        tokenRefreshedOnRetry = outcome.tokenRefreshedOnRetry
                     )
                 )
             }
@@ -137,6 +134,25 @@ class BackendAppCheckRegistrarClient(
         } catch (e: Exception) {
             Log.w(TAG, "Automatic backend App Check registration failed: ${e.message}")
             Result.failure(e)
+        }
+    }
+
+    companion object {
+        private fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .build()
+
+        private fun defaultDeviceModel(): String {
+            val manufacturer = Build.MANUFACTURER.orEmpty().trim()
+            val model = Build.MODEL.orEmpty().trim()
+            return when {
+                manufacturer.isBlank() && model.isBlank() -> "Android Phone"
+                model.startsWith(manufacturer, ignoreCase = true) -> model
+                manufacturer.isBlank() -> model
+                else -> "$manufacturer $model"
+            }
         }
     }
 }

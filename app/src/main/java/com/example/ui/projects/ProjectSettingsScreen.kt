@@ -192,11 +192,37 @@ fun ProjectSettingsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
+                    Surface(
+                        color = SurfaceCardElevated,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, connectionAccent.copy(alpha = 0.25f), RoundedCornerShape(10.dp))
+                            .testTag("backend_diagnostics_panel")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Auth Status: ${state.backendAuthDiagStatus}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "App Check Registrar: ${state.backendRegistrarDiagStatus}" +
+                                    (state.backendHealthLatencyMs?.let { " • Latency: ${it}ms" } ?: ""),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
                     OutlinedTextField(
                         value = backendUrlInput,
                         onValueChange = { backendUrlInput = it },
                         label = { Text("HTTPS Server URL (or http://10.0.2.2:8088 for local testing)") },
-                        placeholder = { Text("https://myraa-backend-xxxxx.run.app") },
+                        placeholder = { Text("https://myraa-super-brain-backend.onrender.com") },
                         singleLine = true,
                         isError = liveUrlValidationError != null,
                         supportingText = {
@@ -211,7 +237,7 @@ fun ProjectSettingsScreen(
                                     Text("Active saved URL: ${state.backendUrlDraft}", color = ElectricTeal)
                                 }
                                 else -> {
-                                    Text("Requires deployed MYRAA Cloud Run backend URL (https://...) or local emulator URL.")
+                                    Text("Requires deployed MYRAA backend URL (https://...) or local emulator URL.")
                                 }
                             }
                         },
@@ -460,6 +486,7 @@ private fun ProviderApiKeyVaultCard(
     val cleanAccountId = accountIdDraft.trim()
     val hasValidKeyFormat = cleanKey.length >= 8 && !cleanKey.any { it.isWhitespace() }
     val hasRequiredAccountId = !provider.requiresAccountId || cleanAccountId.isNotBlank()
+    val prefixMismatchWarning = BackendAiProxyClient.detectProviderKeyPrefixMismatch(provider.providerId, cleanKey)
     val canClickSave = backendConfigured && !isBusy && hasValidKeyFormat && hasRequiredAccountId
 
     val inlineValidationMessage = when {
@@ -468,6 +495,7 @@ private fun ProviderApiKeyVaultCard(
         cleanKey.isBlank() -> "Missing API Key — paste your ${provider.providerId.envKeyName} above."
         cleanKey.any { it.isWhitespace() } -> "Invalid API Key — remove spaces or line breaks."
         cleanKey.length < 8 -> "Invalid API Key — enter at least 8 characters (${cleanKey.length}/8)."
+        prefixMismatchWarning != null -> prefixMismatchWarning
         provider.requiresAccountId && cleanAccountId.isBlank() -> "Cloudflare Account ID is required along with API Token."
         else -> null
     }
@@ -536,8 +564,20 @@ private fun ProviderApiKeyVaultCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            val badgeLabel = when {
+                isBusy -> ProviderKeyVaultStatus.VERIFICATION_IN_PROGRESS.label
+                vaultFeedback != null -> vaultFeedback.status.label
+                !backendConfigured -> ProviderKeyVaultStatus.BACKEND_URL_MISSING.label
+                backendConnectionStatus == BackendConnectionStatus.OFFLINE && !provider.status.isOperational ->
+                    ProviderKeyVaultStatus.BACKEND_OFFLINE.label
+                provider.status.isOperational ||
+                    provider.status == ProviderConnectionStatus.RATE_LIMITED ||
+                    provider.status == ProviderConnectionStatus.QUOTA_EXPIRED ||
+                    provider.status == ProviderConnectionStatus.UNAVAILABLE -> provider.status.label
+                else -> displayedVaultStatus.label
+            }
             StatusBadgeChip(
-                label = if (provider.status.isOperational) provider.status.label else displayedVaultStatus.label,
+                label = badgeLabel,
                 accentColor = statusColor,
                 modifier = Modifier.testTag("vault_status_${provider.providerId.wireId}")
             )
@@ -621,13 +661,21 @@ private fun ProviderApiKeyVaultCard(
                             ProviderKeyVaultStatus.INVALID_API_KEY,
                             ProviderKeyVaultStatus.SAVE_FAILED -> CrimsonError
                         }
+                        val feedbackText = when {
+                            vaultFeedback.message.isBlank() -> vaultFeedback.status.label
+                            vaultFeedback.message.equals(vaultFeedback.status.label, ignoreCase = true) ->
+                                "${vaultFeedback.status.label}: ${provider.displayName} rejected this key (${provider.providerId.envKeyName}). Ensure you pasted the key for ${provider.displayName} and sync the latest backend."
+                            vaultFeedback.message.startsWith(vaultFeedback.status.label, ignoreCase = true) ->
+                                vaultFeedback.message
+                            else -> "${vaultFeedback.status.label}: ${vaultFeedback.message}"
+                        }
                         Surface(
                             color = fbColor.copy(alpha = 0.12f),
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
-                                text = "${vaultFeedback.status.label}: ${vaultFeedback.message}",
+                                text = feedbackText,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = fbColor,
                                 modifier = Modifier

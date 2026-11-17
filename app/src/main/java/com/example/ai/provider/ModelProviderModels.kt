@@ -235,7 +235,8 @@ data class ProviderLiveProbeState(
     val requiresAccountId: Boolean = providerId.requiresAccountId,
     val hasAccountId: Boolean = false,
     val discoveredModels: List<String> = emptyList(),
-    val freeTier: Boolean = providerId.isFreeProvider
+    val freeTier: Boolean = providerId.isFreeProvider,
+    val errorCategory: String = ""
 )
 
 data class ProviderKeySummary(

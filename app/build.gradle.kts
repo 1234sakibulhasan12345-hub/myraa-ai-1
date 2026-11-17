@@ -20,16 +20,19 @@ android {
     versionCode = 1
     versionName = "1.0"
 
-    val envFile = rootProject.file(".env")
-    val envUrlFromFile = if (envFile.exists()) {
-      envFile.readLines()
-        .firstOrNull { it.trimStart().startsWith("MYRAA_DEFAULT_BACKEND_URL=") }
-        ?.substringAfter("MYRAA_DEFAULT_BACKEND_URL=")
+    fun readEnvValue(file: File, key: String): String {
+      if (!file.exists()) return ""
+      return file.readLines()
+        .firstOrNull { it.trimStart().startsWith("$key=") }
+        ?.substringAfter("$key=")
         ?.trim()
         ?.trim('"')
         .orEmpty()
-    } else ""
-    val rawDefaultBackendUrl = (System.getenv("MYRAA_DEFAULT_BACKEND_URL") ?: envUrlFromFile)
+    }
+    val envUrlFromEnvFile = readEnvValue(rootProject.file(".env"), "MYRAA_DEFAULT_BACKEND_URL")
+    val envUrlFromExample = readEnvValue(rootProject.file(".env.example"), "MYRAA_DEFAULT_BACKEND_URL")
+    val rawDefaultBackendUrl = (System.getenv("MYRAA_DEFAULT_BACKEND_URL")?.takeIf { it.isNotBlank() }
+      ?: envUrlFromEnvFile.ifBlank { envUrlFromExample })
       .trim()
       .trim('"')
       .replace("\\", "\\\\")

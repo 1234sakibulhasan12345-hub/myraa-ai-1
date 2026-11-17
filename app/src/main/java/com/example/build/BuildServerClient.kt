@@ -1,15 +1,13 @@
 package com.example.build
 
 import com.example.ai.provider.BackendAiProxyClient
-import com.example.core.security.getAppCheckTokenBestEffort
+import com.example.ai.provider.ProviderHttpException
+import com.example.core.security.FirebaseIdTokenFetcher
+import com.example.core.security.FirebaseIdTokenProvider
 import com.example.data.model.BuildJobStatus
 import com.example.data.model.BuildType
 import com.example.data.model.ProjectFile
-import com.google.firebase.Firebase
-import com.google.firebase.auth.auth
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -17,33 +15,28 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.OutputStream
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
-data class RemoteArtifactDescriptor(
-    val jobId: String,
+data class RemoteBuildArtifactResponse(
     val fileName: String,
     val downloadUrl: String,
     val sha256: String,
     val sizeBytes: Long,
     val buildType: BuildType,
     val apkVerified: Boolean,
-    val signatureVerified: Boolean = false,
     val expiresAtEpochMs: Long
 )
 
 data class RemoteBuildJobResponse(
     val jobId: String,
-    val projectId: String,
-    val buildType: BuildType,
     val status: BuildJobStatus,
-    val logs: String,
-    val errorSummary: String,
-    val durationMs: Long,
-    val artifact: RemoteArtifactDescriptor? = null
+    val logs: String = "",
+    val errorSummary: String = "",
+    val durationMs: Long = 0L,
+    val artifact: RemoteBuildArtifactResponse? = null
 )
 
 data class VerifiedApkDownloadResult(
@@ -52,18 +45,17 @@ data class VerifiedApkDownloadResult(
 )
 
 class BuildServerClient(
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(90, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build(),
-    private val tokenProvider: suspend () -> String? = {
-        Firebase.auth.currentUser?.getIdToken(false)?.await()?.token
-    },
-    private val appCheckTokenProvider: suspend () -> String? = {
-        getAppCheckTokenBestEffort(forceRefresh = false)
-    }
+    private val httpClient: OkHttpClient = defaultHttpClient(),
+    private val tokenFetcher: FirebaseIdTokenFetcher = defaultFirebaseIdTokenFetcher()
 ) {
+    constructor(
+        httpClient: OkHttpClient = defaultHttpClient(),
+        tokenProvider: suspend () -> String?
+    ) : this(
+        httpClient = httpClient,
+        tokenFetcher = FirebaseIdTokenFetcher { _ -> tokenProvider() }
+    )
+
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     suspend fun submitBuild(
@@ -77,8 +69,7 @@ class BuildServerClient(
         files: List<ProjectFile>
     ): Result<RemoteBuildJobResponse> = withContext(Dispatchers.IO) {
         runCatching {
-            val cleanBase = requireValidBaseUrl(baseUrl)
-            val idToken = requireIdToken()
+            val cleanBase = BackendAiProxyClient.requireValidUrl(baseUrl)
             val filesArray = JSONArray().apply {
                 files.forEach { file ->
                     put(
@@ -97,157 +88,168 @@ class BuildServerClient(
                 put("versionName", versionName)
                 put("versionCode", versionCode)
                 put("files", filesArray)
+            }.toString()
+
+            try {
+                executeAuthenticated { bearer ->
+                    Request.Builder()
+                        .url("$cleanBase/v1/builds")
+                        .header("Authorization", "Bearer $bearer")
+                        .post(payload.toRequestBody(jsonMediaType))
+                        .build()
+                }.use { resp ->
+                    val raw = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        throw ProviderHttpException(resp.code, "BUILD_SUBMIT_FAILED", extractErrorMessage(raw, resp.code))
+                    }
+                    parseJobResponse(JSONObject(raw), cleanBase)
+                }
+            } catch (io: IOException) {
+                throw ProviderHttpException(503, "OFFLINE", "Build server unreachable: ${io.localizedMessage}", io)
             }
-            val reqBuilder = Request.Builder()
-                .url("$cleanBase/v1/builds")
-                .addHeader("Authorization", "Bearer $idToken")
-                .post(payload.toString().toRequestBody(jsonMediaType))
-            attachAppCheckHeader(reqBuilder)
-            executeBuildJobRequest(reqBuilder.build(), cleanBase)
-        }.onFailure { if (it is CancellationException) throw it }
+        }
     }
 
-    suspend fun getBuildStatus(
-        baseUrl: String,
-        jobId: String
-    ): Result<RemoteBuildJobResponse> = withContext(Dispatchers.IO) {
-        runCatching {
-            val cleanBase = requireValidBaseUrl(baseUrl)
-            val idToken = requireIdToken()
-            val reqBuilder = Request.Builder()
-                .url("$cleanBase/v1/builds/$jobId")
-                .addHeader("Authorization", "Bearer $idToken")
-                .get()
-            attachAppCheckHeader(reqBuilder)
-            executeBuildJobRequest(reqBuilder.build(), cleanBase)
-        }.onFailure { if (it is CancellationException) throw it }
-    }
+    suspend fun getBuildStatus(baseUrl: String, jobId: String): Result<RemoteBuildJobResponse> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val cleanBase = BackendAiProxyClient.requireValidUrl(baseUrl)
+                try {
+                    executeAuthenticated { bearer ->
+                        Request.Builder()
+                            .url("$cleanBase/v1/builds/$jobId")
+                            .header("Authorization", "Bearer $bearer")
+                            .get()
+                            .build()
+                    }.use { resp ->
+                        val raw = resp.body?.string().orEmpty()
+                        if (!resp.isSuccessful) {
+                            throw ProviderHttpException(resp.code, "BUILD_STATUS_FAILED", extractErrorMessage(raw, resp.code))
+                        }
+                        parseJobResponse(JSONObject(raw), cleanBase)
+                    }
+                } catch (io: IOException) {
+                    throw ProviderHttpException(503, "OFFLINE", "Build status check failed: ${io.localizedMessage}", io)
+                }
+            }
+        }
 
     suspend fun downloadVerifiedApk(
         downloadUrl: String,
         expectedSha256: String,
-        targetOut: OutputStream
+        outputStream: OutputStream
     ): Result<VerifiedApkDownloadResult> = withContext(Dispatchers.IO) {
         runCatching {
-            val cleanExpected = expectedSha256.trim().lowercase()
-            require(cleanExpected.length == 64 && cleanExpected.all { it in '0'..'9' || it in 'a'..'f' }) {
-                "Invalid expected APK SHA-256 checksum."
+            val cleanUrl = BackendAiProxyClient.requireValidUrl(downloadUrl)
+            val normalizedExpected = expectedSha256.trim().lowercase()
+            require(normalizedExpected.length == 64 && normalizedExpected.all { it in '0'..'9' || it in 'a'..'f' }) {
+                "Invalid SHA-256 artifact checksum."
             }
-            val validationError = BackendAiProxyClient.validateBackendUrlError(downloadUrl)
-            require(validationError == null) { validationError ?: "Invalid APK download URL." }
 
-            val idToken = requireIdToken()
-            val reqBuilder = Request.Builder()
-                .url(downloadUrl.trim())
-                .addHeader("Authorization", "Bearer $idToken")
-                .get()
-            attachAppCheckHeader(reqBuilder)
-
-            httpClient.newCall(reqBuilder.build()).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    val errBody = resp.body?.string().orEmpty()
-                    throw IOException(extractError(errBody, "APK download failed (HTTP ${resp.code})."))
-                }
-                val body = resp.body ?: throw IOException("Empty APK response body.")
-                val buffer = ByteArrayOutputStream()
-                val digest = MessageDigest.getInstance("SHA-256")
-                val chunk = ByteArray(16 * 1024)
-                var totalRead = 0L
-
-                body.byteStream().use { input ->
-                    while (true) {
-                        val read = input.read(chunk)
-                        if (read <= 0) break
-                        if (totalRead == 0L) {
-                            check(read >= 4 &&
-                                chunk[0] == 0x50.toByte() &&
-                                chunk[1] == 0x4B.toByte() &&
-                                chunk[2] == 0x03.toByte() &&
-                                chunk[3] == 0x04.toByte()
-                            ) {
-                                throw IOException("Downloaded binary failed ZIP/APK magic header check.")
-                            }
-                        }
-                        digest.update(chunk, 0, read)
-                        buffer.write(chunk, 0, read)
-                        totalRead += read
+            try {
+                executeAuthenticated { bearer ->
+                    Request.Builder()
+                        .url(cleanUrl)
+                        .header("Authorization", "Bearer $bearer")
+                        .get()
+                        .build()
+                }.use { resp ->
+                    if (!resp.isSuccessful) {
+                        val raw = resp.body?.string().orEmpty()
+                        throw ProviderHttpException(resp.code, "DOWNLOAD_FAILED", extractErrorMessage(raw, resp.code))
                     }
-                }
+                    val bodyStream = resp.body?.byteStream()
+                        ?: throw IllegalStateException("Empty APK download response body.")
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    val buffer = ByteArray(16 * 1024)
+                    var totalBytes = 0L
+                    val magicHeader = ByteArray(2)
+                    var headerRead = 0
 
-                val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
-                if (!actualSha256.equals(cleanExpected, ignoreCase = true)) {
-                    throw IOException("Downloaded APK failed SHA-256 integrity verification.")
-                }
+                    while (true) {
+                        val read = bodyStream.read(buffer)
+                        if (read <= 0) break
+                        if (headerRead < 2) {
+                            val needed = (2 - headerRead).coerceAtMost(read)
+                            System.arraycopy(buffer, 0, magicHeader, headerRead, needed)
+                            headerRead += needed
+                        }
+                        digest.update(buffer, 0, read)
+                        outputStream.write(buffer, 0, read)
+                        totalBytes += read
+                    }
+                    outputStream.flush()
 
-                buffer.writeTo(targetOut)
-                targetOut.flush()
-                VerifiedApkDownloadResult(bytesWritten = totalRead, sha256Hex = actualSha256)
+                    if (headerRead < 2 || magicHeader[0] != 'P'.code.toByte() || magicHeader[1] != 'K'.code.toByte()) {
+                        throw IllegalStateException("Downloaded artifact is not a valid ZIP/APK binary archive.")
+                    }
+                    val actualSha = digest.digest().joinToString("") { "%02x".format(it) }
+                    if (!actualSha.equals(normalizedExpected, ignoreCase = true)) {
+                        throw IllegalStateException("APK SHA-256 verification failed: expected $normalizedExpected but got $actualSha.")
+                    }
+                    VerifiedApkDownloadResult(bytesWritten = totalBytes, sha256Hex = actualSha)
+                }
+            } catch (io: IOException) {
+                throw ProviderHttpException(503, "OFFLINE", "APK download failed: ${io.localizedMessage}", io)
             }
-        }.onFailure { if (it is CancellationException) throw it }
+        }
     }
 
-    private fun executeBuildJobRequest(request: Request, cleanBase: String): RemoteBuildJobResponse {
-        httpClient.newCall(request).execute().use { resp ->
-            val raw = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                throw IOException(extractError(raw, "Build server returned HTTP ${resp.code}."))
-            }
-            val obj = JSONObject(raw)
-            val artifactObj = obj.optJSONObject("artifact")
-            val artifact = if (artifactObj != null) {
-                val downloadPath = artifactObj.optString("downloadPath")
-                val fullDownloadUrl = when {
-                    downloadPath.startsWith("http://") || downloadPath.startsWith("https://") -> downloadPath
-                    downloadPath.startsWith("/") -> "$cleanBase$downloadPath"
-                    else -> "$cleanBase/$downloadPath"
-                }
-                RemoteArtifactDescriptor(
-                    jobId = artifactObj.optString("jobId", obj.optString("jobId")),
-                    fileName = artifactObj.optString("fileName", "app-debug.apk"),
-                    downloadUrl = fullDownloadUrl,
-                    sha256 = artifactObj.optString("sha256"),
-                    sizeBytes = artifactObj.optLong("sizeBytes"),
-                    buildType = BuildType.fromWire(artifactObj.optString("buildType", "DEBUG")),
-                    apkVerified = artifactObj.optBoolean("apkVerified", false),
-                    signatureVerified = artifactObj.optBoolean("signatureVerified", false),
-                    expiresAtEpochMs = artifactObj.optLong("expiresAtEpochMs")
+    private suspend fun executeAuthenticated(buildRequest: (String) -> Request): okhttp3.Response {
+        return FirebaseIdTokenProvider.executeWithBearerRetry(
+            httpClient = httpClient,
+            tokenFetcher = tokenFetcher,
+            onMissingToken = {
+                ProviderHttpException(
+                    httpCode = 401,
+                    errorCode = "FIREBASE_AUTH_REQUIRED",
+                    message = "Sign in with Google before calling remote build server."
                 )
-            } else {
-                null
-            }
-            return RemoteBuildJobResponse(
-                jobId = obj.optString("jobId"),
-                projectId = obj.optString("projectId"),
-                buildType = BuildType.fromWire(obj.optString("buildType", "DEBUG")),
-                status = BuildJobStatus.fromWire(obj.optString("status", "QUEUED")),
-                logs = obj.optString("logs"),
-                errorSummary = obj.optString("errorSummary"),
-                durationMs = obj.optLong("durationMs"),
-                artifact = artifact
+            },
+            requestFactory = { bearer -> buildRequest(bearer) }
+        ).response
+    }
+
+    private fun parseJobResponse(json: JSONObject, cleanBase: String): RemoteBuildJobResponse {
+        val status = BuildJobStatus.fromWire(json.optString("status", "QUEUED"))
+        val artifactObj = json.optJSONObject("artifact")
+        val artifact = artifactObj?.let { art ->
+            val rawUrl = art.optString("downloadUrl", "")
+            val resolvedUrl = if (rawUrl.startsWith("/")) "$cleanBase$rawUrl" else rawUrl
+            RemoteBuildArtifactResponse(
+                fileName = art.optString("fileName", "app-debug.apk"),
+                downloadUrl = resolvedUrl,
+                sha256 = art.optString("sha256", ""),
+                sizeBytes = art.optLong("sizeBytes", 0L),
+                buildType = BuildType.fromWire(art.optString("buildType", "DEBUG")),
+                apkVerified = art.optBoolean("apkVerified", false),
+                expiresAtEpochMs = art.optLong("expiresAtEpochMs", 0L)
             )
         }
+        return RemoteBuildJobResponse(
+            jobId = json.optString("jobId", ""),
+            status = status,
+            logs = json.optString("logs", ""),
+            errorSummary = json.optString("errorSummary", ""),
+            durationMs = json.optLong("durationMs", 0L),
+            artifact = artifact
+        )
     }
 
-    private suspend fun attachAppCheckHeader(builder: Request.Builder) {
-        val token = appCheckTokenProvider()?.trim().orEmpty()
-        if (token.isNotBlank()) {
-            builder.addHeader("X-Firebase-AppCheck", token)
-        }
+    private fun extractErrorMessage(raw: String, httpCode: Int): String {
+        return runCatching { JSONObject(raw).optString("error") }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: "Remote build server returned HTTP $httpCode"
     }
 
-    private fun requireValidBaseUrl(baseUrl: String): String {
-        val clean = baseUrl.trim().trimEnd('/')
-        val err = BackendAiProxyClient.validateBackendUrlError(clean)
-        require(err == null) { err ?: "Invalid Backend URL." }
-        return clean
+    companion object {
+        fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .build()
+
+        fun defaultFirebaseIdTokenFetcher(): FirebaseIdTokenFetcher = FirebaseIdTokenProvider.defaultFetcher()
     }
-
-    private suspend fun requireIdToken(): String =
-        tokenProvider()?.trim()?.takeIf { it.isNotBlank() }
-            ?: throw IllegalStateException("Please sign in with Google before dispatching remote builds.")
-
-    private fun extractError(rawBody: String, fallback: String): String =
-        runCatching {
-            JSONObject(rawBody).optString("error").takeIf { it.isNotBlank() }
-        }.getOrNull() ?: fallback
 }

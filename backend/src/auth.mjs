@@ -31,10 +31,11 @@ async function getGooglePublicCerts(fetchImpl = fetch) {
 }
 
 export class AuthError extends Error {
-  constructor(message, statusCode = 401) {
+  constructor(message, statusCode = 401, errorCode = "FIREBASE_AUTH_REQUIRED") {
     super(message);
     this.name = "AuthError";
     this.statusCode = statusCode;
+    this.errorCode = errorCode;
   }
 }
 
@@ -47,7 +48,7 @@ export function createFirebaseAuthVerifier(options = {}) {
   return async function verifyRequestAuth(headers, requestOptions = {}) {
     const authHeader = headers?.authorization || headers?.Authorization || "";
     if (!authHeader.startsWith("Bearer ")) {
-      throw new AuthError("Missing Bearer Firebase ID token.", 401);
+      throw new AuthError("Missing Bearer Firebase ID token.", 401, "FIREBASE_AUTH_REQUIRED");
     }
 
     const skipAppCheck = Boolean(requestOptions.skipAppCheck);
@@ -56,17 +57,17 @@ export function createFirebaseAuthVerifier(options = {}) {
         headers?.["x-firebase-appcheck"] || headers?.["X-Firebase-AppCheck"] || ""
       ).trim();
       if (appCheckToken.length < 10) {
-        throw new AuthError("Missing required Firebase App Check attestation header.", 401);
+        throw new AuthError("Missing required Firebase App Check attestation header.", 401, "APP_CHECK_REQUIRED");
       }
       if (appCheckToken.startsWith("{") || appCheckToken.split(".").length !== 3) {
-        throw new AuthError("Firebase App Check token is invalid.", 401);
+        throw new AuthError("Firebase App Check token is invalid.", 401, "APP_CHECK_REQUIRED");
       }
     }
 
     const token = authHeader.slice("Bearer ".length).trim();
     const parts = token.split(".");
     if (parts.length !== 3) {
-      throw new AuthError("Malformed JWT token.", 401);
+      throw new AuthError("Malformed JWT token.", 401, "FIREBASE_AUTH_REQUIRED");
     }
 
     let header;
@@ -75,15 +76,15 @@ export function createFirebaseAuthVerifier(options = {}) {
       header = decodeBase64UrlJson(parts[0]);
       payload = decodeBase64UrlJson(parts[1]);
     } catch {
-      throw new AuthError("Invalid JWT encoding.", 401);
+      throw new AuthError("Invalid JWT encoding.", 401, "FIREBASE_AUTH_REQUIRED");
     }
 
     const nowSec = Math.floor(Date.now() / 1000);
     if (typeof payload.sub !== "string" || payload.sub.length === 0 || payload.sub.length > 128) {
-      throw new AuthError("Invalid subject claim.", 401);
+      throw new AuthError("Invalid subject claim.", 401, "FIREBASE_AUTH_REQUIRED");
     }
     if (typeof payload.exp !== "number" || payload.exp <= nowSec) {
-      throw new AuthError("Firebase ID token has expired.", 401);
+      throw new AuthError("Firebase ID token has expired.", 401, "FIREBASE_AUTH_REQUIRED");
     }
 
     // Emulator mode (only enabled explicitly in local test harnesses)
@@ -96,13 +97,13 @@ export function createFirebaseAuthVerifier(options = {}) {
     }
 
     if (header.alg !== "RS256" || typeof header.kid !== "string") {
-      throw new AuthError("Unsupported token algorithm or missing key ID.", 401);
+      throw new AuthError("Unsupported token algorithm or missing key ID.", 401, "FIREBASE_AUTH_REQUIRED");
     }
     if (payload.aud !== projectId) {
-      throw new AuthError(`Token audience '${payload.aud}' does not match project '${projectId}'.`, 401);
+      throw new AuthError(`Token audience '${payload.aud}' does not match project '${projectId}'.`, 401, "FIREBASE_AUTH_REQUIRED");
     }
     if (payload.iss !== `https://securetoken.google.com/${projectId}`) {
-      throw new AuthError("Token issuer mismatch.", 401);
+      throw new AuthError("Token issuer mismatch.", 401, "FIREBASE_AUTH_REQUIRED");
     }
 
     const certs = await getGooglePublicCerts(fetchImpl);

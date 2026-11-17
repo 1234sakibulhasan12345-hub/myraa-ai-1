@@ -105,7 +105,20 @@ class ProjectSettingsScreenTest {
 
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/health") { ex ->
-            val body = """{"service":"myraa-super-brain-backend","status":"ok","timestampEpochMs":1700000000000}""".toByteArray()
+            val body = """{"service":"myraa-super-brain-backend","status":"ok","appCheckAutoRegistrarConfigured":true,"timestampEpochMs":1700000000000}""".toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, body.size.toLong())
+            ex.responseBody.use { it.write(body) }
+        }
+        server.createContext("/v1/appcheck/registrar/status") { ex ->
+            val auth = ex.requestHeaders.getFirst("Authorization").orEmpty()
+            if (auth != "Bearer test_firebase_id_token") {
+                val err = """{"error":"Missing Bearer Firebase ID token."}""".toByteArray()
+                ex.sendResponseHeaders(401, err.size.toLong())
+                ex.responseBody.use { it.write(err) }
+                return@createContext
+            }
+            val body = """{"configured":true,"credentialMode":"SERVICE_ACCOUNT_ENV","projectId":"gen-lang-client-0645829429","androidPackage":"com.aistudio.myraa.qxkrmp","reason":"Active"}""".toByteArray()
             ex.responseHeaders.add("Content-Type", "application/json")
             ex.sendResponseHeaders(200, body.size.toLong())
             ex.responseBody.use { it.write(body) }
@@ -194,6 +207,10 @@ class ProjectSettingsScreenTest {
         val builder = AppBuilderOrchestrator(registry, coding)
         val buildClient = BuildServerClient(httpClient = testOkHttp, tokenProvider = { "test_firebase_id_token" })
 
+        assertEquals(
+            "https://myraa-super-brain-backend.onrender.com",
+            com.example.BuildConfig.MYRAA_DEFAULT_BACKEND_URL
+        )
         viewModel = EngineeringStudioViewModel(
             repository = repository,
             registry = registry,
@@ -205,7 +222,8 @@ class ProjectSettingsScreenTest {
             workspaceStateFlow = MutableStateFlow<StreamUiState<UserWorkspace?>>(StreamUiState.Success(null)),
             onActivateProject = {},
             currentUserId = testUid,
-            backendUrlLocalStore = localStore
+            backendUrlLocalStore = localStore,
+            defaultBackendUrl = ""
         )
     }
 
@@ -267,6 +285,11 @@ class ProjectSettingsScreenTest {
         composeTestRule.onNodeWithTag("backend_connection_status_chip")
             .performScrollTo()
             .assertTextContains("CONNECTED", substring = true)
+        assertTrue(viewModel.uiState.value.backendAuthDiagStatus.contains("Verified", ignoreCase = true))
+        assertTrue(viewModel.uiState.value.backendRegistrarDiagStatus.contains("SERVICE_ACCOUNT_ENV"))
+        composeTestRule.onNodeWithTag("backend_diagnostics_panel")
+            .performScrollTo()
+            .assertExists()
 
         // 4. Short API key keeps button disabled with clear validation message
         composeTestRule.onNodeWithTag("settings_lazy_column").performScrollToKey("vault_groq")

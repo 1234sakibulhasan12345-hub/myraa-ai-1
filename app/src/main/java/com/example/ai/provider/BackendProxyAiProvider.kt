@@ -498,11 +498,11 @@ class BackendProxyAiProvider(
 
                 ProviderId.NVIDIA_NIM -> listOf(
                     AiModelDescriptor(
-                        modelId = "meta/llama-3.3-70b-instruct",
+                        modelId = "deepseek-ai/deepseek-v4.1-flash",
                         providerId = ProviderId.NVIDIA_NIM,
-                        displayName = "Llama 3.3 70B Instruct (NIM)",
+                        displayName = "DeepSeek V4.1 Flash (NIM)",
                         roleSummary = "GPU-accelerated NVIDIA Build serverless API with free credits",
-                        capabilities = setOf(ModelCapability.REASONING, ModelCapability.CODING),
+                        capabilities = setOf(ModelCapability.REASONING, ModelCapability.CODING, ModelCapability.FAST_CHAT),
                         latencyTier = "Fast",
                         costTier = "FREE",
                         isLiveInCurrentBuild = isLive,
@@ -511,12 +511,12 @@ class BackendProxyAiProvider(
                         freeTierLimitsSummary = "NVIDIA Build Free Developer Credits"
                     ),
                     AiModelDescriptor(
-                        modelId = "deepseek-ai/deepseek-r1",
+                        modelId = "google/gemma-3-12b-it",
                         providerId = ProviderId.NVIDIA_NIM,
-                        displayName = "DeepSeek R1 (NVIDIA NIM)",
-                        roleSummary = "Deep step-by-step architecture & static debugging reasoning",
-                        capabilities = setOf(ModelCapability.REASONING, ModelCapability.CODING),
-                        latencyTier = "Standard",
+                        displayName = "Gemma 3 12B IT (NVIDIA NIM)",
+                        roleSummary = "Compact fast instruction & static code analysis on NVIDIA NIM",
+                        capabilities = setOf(ModelCapability.FAST_CHAT, ModelCapability.CODING),
+                        latencyTier = "Ultra Fast",
                         costTier = "FREE",
                         isLiveInCurrentBuild = isLive,
                         requiresBillingOrBackendProxy = true,
@@ -524,11 +524,11 @@ class BackendProxyAiProvider(
                         freeTierLimitsSummary = "NVIDIA Build Free Developer Credits"
                     ),
                     AiModelDescriptor(
-                        modelId = "qwen/qwen2.5-coder-32b-instruct",
+                        modelId = "google/gemma-4-31b-it",
                         providerId = ProviderId.NVIDIA_NIM,
-                        displayName = "Qwen 2.5 Coder 32B (NIM)",
-                        roleSummary = "Specialized code synthesis, Gradle build & bug fixes",
-                        capabilities = setOf(ModelCapability.CODING, ModelCapability.REASONING),
+                        displayName = "Gemma 4 31B IT (NVIDIA NIM)",
+                        roleSummary = "Deep step-by-step architecture & reasoning on NVIDIA NIM",
+                        capabilities = setOf(ModelCapability.REASONING, ModelCapability.CODING),
                         latencyTier = "Fast",
                         costTier = "FREE",
                         isLiveInCurrentBuild = isLive,

@@ -5,10 +5,12 @@ import {
   AppCheckRegistrarError,
   createAppCheckRegistrar
 } from "./appCheckRegistrar.mjs";
-import { createAiProviderRouter, ProviderCallError } from "./aiProviders.mjs";
+import { createAiProviderRouter, PROVIDER_CONFIGS, ProviderCallError } from "./aiProviders.mjs";
 import { AuthError, createFirebaseAuthVerifier } from "./auth.mjs";
 import { BuildValidationError } from "./buildSecurity.mjs";
 import { createBuildQueueManager } from "./buildWorker.mjs";
+import { createCorsHandler } from "./cors.mjs";
+import { VaultError } from "./providerKeyVault.mjs";
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
@@ -45,8 +47,18 @@ export function createMyraaBackendServer(options = {}) {
   const aiRouter = options.aiRouter || createAiProviderRouter(options);
   const buildManager = options.buildManager || createBuildQueueManager(options);
   const appCheckRegistrar = options.appCheckRegistrar || createAppCheckRegistrar(options);
+  const corsHandler = options.corsHandler || createCorsHandler(options);
 
   return http.createServer(async (req, res) => {
+    const corsResult = corsHandler.handle(req, res);
+    if (corsResult.isPreflight) {
+      if (!corsResult.originPresent) {
+        res.writeHead(204);
+        res.end();
+      }
+      return;
+    }
+
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     const pathname = url.pathname;
 
@@ -56,6 +68,7 @@ export function createMyraaBackendServer(options = {}) {
           status: "ok",
           service: "myraa-super-brain-backend",
           appCheckAutoRegistrarConfigured: appCheckRegistrar.getStatus().configured,
+          corsAllowlistCount: corsHandler.allowedOrigins.size,
           timestampEpochMs: Date.now()
         });
       }
@@ -101,6 +114,7 @@ export function createMyraaBackendServer(options = {}) {
           freeOnly: true
         });
         return sendJson(res, 200, {
+          vaultStatus: aiRouter.keyVault.getDiagnostics(),
           providers: statuses.map((p) => ({
             providerId: p.providerId,
             displayName: p.displayName,
@@ -109,7 +123,8 @@ export function createMyraaBackendServer(options = {}) {
             maskedKeyHint: p.maskedKeyHint,
             requiresAccountId: p.requiresAccountId,
             hasAccountId: p.hasAccountId,
-            statusCode: p.statusCode
+            statusCode: p.statusCode,
+            errorCategory: p.errorCategory || "NONE"
           }))
         });
       }
@@ -121,37 +136,57 @@ export function createMyraaBackendServer(options = {}) {
         if (!providerId) {
           return sendJson(res, 400, { error: "providerId is required.", errorCode: "INVALID_PROVIDER" });
         }
-        if (providerId === "cloudflare_ai" && !accountId) {
-          return sendJson(res, 400, {
-            error: "Cloudflare Account ID is required along with CLOUDFLARE_API_TOKEN.",
-            errorCode: "ACCOUNT_ID_REQUIRED"
-          });
+        const cfg = PROVIDER_CONFIGS[providerId];
+        if (!cfg) {
+          return sendJson(res, 400, { error: `Unknown provider '${providerId}'.`, errorCode: "UNKNOWN_PROVIDER" });
         }
-        aiRouter.keyVault.setProviderCredentials(authUser.uid, providerId, {
+
+        let existingCreds = null;
+        try {
+          existingCreds = aiRouter.keyVault.getProviderCredentials(authUser.uid, providerId);
+        } catch {
+          existingCreds = null;
+        }
+
+        // Probe the candidate key BEFORE mutating the vault so existing valid keys
+        // are never deleted or overwritten if the candidate key fails validation.
+        const verifiedStatus = await aiRouter.probeCandidateCredentials(providerId, {
           apiKey: body.apiKey,
           accountId
         });
-        const verifiedStatus = await aiRouter.probeSingleProvider(providerId, {
-          liveProbe: true,
-          userId: authUser.uid
-        });
-        if (verifiedStatus.statusCode === "INVALID_API_KEY") {
-          aiRouter.keyVault.deleteProviderCredentials(authUser.uid, providerId);
+
+        const shouldRejectWithoutSaving =
+          verifiedStatus.statusCode === "INVALID_API_KEY" ||
+          verifiedStatus.statusCode === "CONFIGURATION_ERROR";
+
+        if (shouldRejectWithoutSaving) {
           return sendJson(res, 200, {
             saved: false,
             verified: false,
+            preservedExistingKey: Boolean(existingCreds),
             provider: {
               ...verifiedStatus,
-              keyConfigured: false,
-              keySource: "NONE",
-              maskedKeyHint: ""
+              keyConfigured: Boolean(existingCreds),
+              keySource: existingCreds ? "USER_VAULT" : "NONE",
+              maskedKeyHint: existingCreds ? existingCreds.maskedHint : ""
             }
           });
         }
+
+        const storedMeta = aiRouter.keyVault.setProviderCredentials(authUser.uid, providerId, {
+          apiKey: body.apiKey,
+          accountId,
+          envKey: cfg.envKey
+        });
         return sendJson(res, 200, {
           saved: true,
           verified: Boolean(verifiedStatus.connected),
-          provider: verifiedStatus
+          provider: {
+            ...verifiedStatus,
+            keyConfigured: true,
+            keySource: "USER_VAULT",
+            maskedKeyHint: storedMeta.maskedHint
+          }
         });
       }
 
@@ -270,7 +305,17 @@ export function createMyraaBackendServer(options = {}) {
       return sendJson(res, 404, { error: "Endpoint not found." });
     } catch (err) {
       if (err instanceof AuthError) {
-        return sendJson(res, err.statusCode, { error: err.message });
+        return sendJson(res, err.statusCode, {
+          error: err.message,
+          errorCode: err.errorCode || "FIREBASE_AUTH_REQUIRED"
+        });
+      }
+      if (err instanceof VaultError) {
+        return sendJson(res, err.statusCode, {
+          error: err.message,
+          errorCode: err.errorCode || "CONFIGURATION_ERROR",
+          errorCategory: "CONFIGURATION_ERROR"
+        });
       }
       if (err instanceof AppCheckRegistrarError) {
         return sendJson(res, err.statusCode, { error: err.message, code: err.code });
@@ -279,7 +324,11 @@ export function createMyraaBackendServer(options = {}) {
         return sendJson(res, 400, { error: err.message });
       }
       if (err instanceof ProviderCallError) {
-        return sendJson(res, err.statusCode, { error: err.message, errorCode: err.errorCode });
+        return sendJson(res, err.statusCode, {
+          error: err.message,
+          errorCode: err.errorCode,
+          errorCategory: err.errorCategory || "PROVIDER_UNAVAILABLE"
+        });
       }
       const status = err?.statusCode || 500;
       return sendJson(res, status, { error: err?.message || "Internal server error." });

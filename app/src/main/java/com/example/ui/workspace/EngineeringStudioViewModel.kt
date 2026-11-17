@@ -62,7 +62,8 @@ class EngineeringStudioViewModel(
     private val workspaceStateFlow: StateFlow<StreamUiState<UserWorkspace?>>,
     onActivateProject: (String) -> Unit,
     private val currentUserId: String,
-    private val backendUrlLocalStore: BackendUrlLocalStore? = null
+    private val backendUrlLocalStore: BackendUrlLocalStore? = null,
+    private val defaultBackendUrl: String = BuildConfig.MYRAA_DEFAULT_BACKEND_URL
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(EngineeringStudioUiState())
@@ -154,7 +155,7 @@ class EngineeringStudioViewModel(
     private var hasBootstrappedAppCheck = false
 
     init {
-        val defaultBuildConfigUrl = BuildConfig.MYRAA_DEFAULT_BACKEND_URL
+        val defaultBuildConfigUrl = defaultBackendUrl
             .trim()
             .trim('"')
             .trimEnd('/')
